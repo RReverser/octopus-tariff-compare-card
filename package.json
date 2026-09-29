@@ -1,0 +1,25 @@
+{
+  "name": "octopus-tariff-compare-card",
+  "version": "0.1.0",
+  "description": "Home Assistant card: what your metered usage would cost on every Octopus Energy tariff in your region, vs your current one",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w",
+    "build:dev": "BUILD=dev rollup -c"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "apexcharts": "4.7.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-terser": "^1.0.0",
+    "rollup": "^4.63.5"
+  },
+  "type": "module",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RReverser/octopus-tariff-compare-card"
+  }
+}

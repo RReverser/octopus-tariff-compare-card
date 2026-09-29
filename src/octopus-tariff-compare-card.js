@@ -305,16 +305,19 @@ class OctopusTariffCompareCard extends HTMLElement {
   }
 
   // Lines for period [a, b]: running difference vs the current tariff from a, thinned; totals over the period; tooltip; unavailable
-  // (na) with the reason; or still loading (no points, no total).
+  // (na) with the reason; or still loading (no values, no total).
+  // Every line has a point at the same times, with no value (null) where it has none: apexcharts shows a shared tooltip (every line's
+  // value at the hovered time) only when all series have the same number of points.
   _view(a, b) {
     const d = this._data, load = !this._dragging;
     const base = this._cost(d, d.lines[0], a, b, load);
     const bc = base.cum || [[a, 0]];
+    const blank = thin(bc.map(([t]) => [t, null]), MAX_POINTS);
     return d.lines.map((l, i) => {
-      if (l.na) return {...l, points: [], total: null, tip: `${l.head}\n${l.na}\nCode: ${l.key}`};
+      if (l.na) return {...l, points: blank, total: null, tip: `${l.head}\n${l.na}\nCode: ${l.key}`};
       const r = i === 0 ? base : this._cost(d, l, a, b, load);
-      if (r.why) return {...l, na: 'Cannot be priced', points: [], total: null, tip: `${l.head}\n${cap(r.why)}\nCode: ${l.key}`};
-      if (!r.cum || !base.cum) return {...l, points: [], total: null, tip: `${l.head}\nLoading prices…`};
+      if (r.why) return {...l, na: 'Cannot be priced', points: blank, total: null, tip: `${l.head}\n${cap(r.why)}\nCode: ${l.key}`};
+      if (!r.cum || !base.cum) return {...l, points: blank, total: null, tip: `${l.head}\nLoading prices…`};
       const pts = bc.map(([t, v]) => [t, Math.round((r.cum[idxAt(r.cum, t)][1] - v) * 100) / 100]);
       const tip = [l.head, ...this._tipLines(d.fuels, d.fuels.map((f) => r.basis[f].map(cap).join('\n')))].join('\n');
       return {...l, points: thin(pts, MAX_POINTS), total: r.cum[r.cum.length - 1][1], tip};
@@ -432,7 +435,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       yaxis: {min: () => -this._yRange(), max: () => this._yRange(), tickAmount: 6, labels: {formatter: (v) => v.toFixed(2)},
         title: {text: '£ vs current tariff (+ = dearer)'}},
       tooltip: {shared: true, intersect: false, x: {format: 'ddd dd MMM HH:mm'},
-        y: {formatter: (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + '£' + Math.abs(v).toFixed(2)}},
+        y: {formatter: (v) => (v == null ? '…' : (v > 0 ? '+' : v < 0 ? '−' : '') + '£' + Math.abs(v).toFixed(2))}},
     };
     const brush = {
       chart: {type: 'area', height: this._config.brush_height, background: 'transparent', foreColor: th.fg, fontFamily: 'inherit',

@@ -61,6 +61,16 @@ test.describe('short history (10 days)', () => {
     expect((await legend(page))[5].hidden).toBe(false);
   });
 
+  test('hovering the chart shows every shown line\'s value, also with unavailable tariffs listed', async ({page}) => {
+    await open(page, 'short');
+    const g = await page.evaluate(() => { const b = window.card.shadowRoot.querySelector('.main .apexcharts-series').getBoundingClientRect(); return {x: b.x, y: b.y, w: b.width, h: b.height}; });
+    await page.mouse.move(g.x + g.w * 0.6, g.y + g.h * 0.5, {steps: 5});
+    const rows = () => page.evaluate(() => [...window.card.shadowRoot.querySelectorAll('.main .apexcharts-tooltip-series-group')]
+      .filter((x) => getComputedStyle(x).display !== 'none').map((x) => x.textContent.trim().split(':')[0]).filter(Boolean));
+    // Shown by default: your tariff, 12M Fixed and Tracker (18M Fixed is unavailable here).
+    await expect.poll(rows).toEqual(['Flexible', '12M Fixed', 'Tracker']);
+  });
+
   test('tooltips: name, what the prices are based on, code', async ({page}) => {
     await open(page, 'short');
     const t = Object.fromEntries((await lines(page)).lines.map((l) => [l.key, l.tip]));

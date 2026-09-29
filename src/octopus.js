@@ -1,7 +1,8 @@
 // Octopus Energy cost engine: prices your metered usage (Home Assistant long-term statistics) on any Octopus import tariff using the
 // public Octopus products API. No API key needed.
+import {API, getJSON, cachedList} from './api.js';
 
-export const API = 'https://api.octopus.energy/v1/products/';
+export {API};
 export const FUELS = ['electricity', 'gas'];
 export const keyOf = (code) => code.replace(/-\d\d-\d\d-\d\d$/, '');
 // Product key of a tariff code such as E-1R-VAR-22-11-01-H (fuel prefix, product code, region letter).
@@ -21,28 +22,10 @@ export const TRACKER = [
   ['SILVER-26-04-01', '2026-04-01T00:00:00+01:00', null],
 ];
 
-const fetchAll = async (url) => {
-  const res = [];
-  while (url) {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`Octopus API ${r.status} for ${url}`);
-    const j = await r.json();
-    res.push(...(j.results || []));
-    url = j.next;
-  }
-  return res;
-};
-
-const lists = {};
-// Rate lists by URL for the page's lifetime: request windows are rounded to whole UTC days, so re-costing the same history later
-// (a periodic refresh) re-uses them instead of fetching again.
-const rates = {};
-const fetchRates = (url) => rates[url] || (rates[url] = fetchAll(url).catch((e) => { delete rates[url]; throw e; }));
 const DAY = 864e5;
 const imports = async (t) => {
   const url = API + '?brand=OCTOPUS_ENERGY&is_business=false&page_size=100' + (t === undefined ? '' : '&available_at=' + new Date(t).toISOString());
-  return (await (lists[url] || (lists[url] = fetchAll(url).catch((e) => { delete lists[url]; throw e; }))))
-    .filter((p) => p.direction === 'IMPORT' && !p.is_prepay && !p.is_business);
+  return (await cachedList(url)).filter((p) => p.direction === 'IMPORT' && !p.is_prepay && !p.is_business);
 };
 const latest = (arr) => arr.sort((x, y) => Date.parse(y.available_from) - Date.parse(x.available_from))[0];
 const shortName = (dn) => dn.replace(/\bOctopus\b/g, '').replace(/\bImport\b/g, '').replace(/\s+/g, ' ').trim() || dn;
@@ -58,7 +41,8 @@ export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => 
   }
   const codes = [...[...newest.values()].map((p) => p.code), ...(newest.has('SILVER') ? [] : [TRACKER[TRACKER.length - 1][0]])];
   const fams = await Promise.all(codes.map(async (code) => {
-    const d = await (await fetch(API + code + '/')).json();
+    let d;
+    try { d = await getJSON(API + code + '/'); } catch { return {fuels: ''}; }  // product unavailable: leave it out
     // Payment keys vary by product (direct_debit_monthly, or 'varying' on Flexible): any tariff for the region counts, except free
     // ones (explicit zero unit rate and standing charge: Octopus Zero / Zero Bills, only for registered Zero homes). Time-of-use
     // products such as Go 12M Fixed report null for these summary fields, so only an explicit 0 and 0 excludes.
@@ -99,6 +83,52 @@ const consumption = (cache, hass, id, a0, b0) => {
   })());
 };
 
+const iso = (t) => new Date(t).toISOString();
+// Calendar months (UTC) overlapping [a, b): [[monthStart, nextMonthStart], ...].
+const months = (a, b) => {
+  const out = [];
+  const d = new Date(a);
+  for (let m = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); m < b;) {
+    const n = new Date(m); const next = Date.UTC(n.getUTCFullYear(), n.getUTCMonth() + 1, 1);
+    out.push([m, next]); m = next;
+  }
+  return out;
+};
+const localMidnight = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const minutesOfDay = (t) => { const d = new Date(t); return d.getHours() * 60 + d.getMinutes(); };
+
+// Prices of a fixed tariff over [a, b), as [[start, end, price], ...]: what signing up today would get you, for the whole window.
+// A flat fix has one open-ended price. Time-of-use fixes (Cosy, Go) publish their slots day by day a few days ahead, so the latest
+// fully published day's pattern is repeated on every day of the window, by local time of day.
+export const fixedPrices = (list, a, b) => {
+  const now = Date.now();
+  // Flat: the open-ended price in force now (or, for a product not yet started, its first price).
+  const open = list.filter((x) => !x.valid_to).sort((x, y) => Date.parse(x.valid_from) - Date.parse(y.valid_from));
+  const cur = open.filter((x) => Date.parse(x.valid_from) <= now).pop() || open[0];
+  if (cur) return [[a, b, cur.value_inc_vat]];
+  const slots = list.filter((x) => x.valid_to).map((x) => [Date.parse(x.valid_from), Date.parse(x.valid_to), x.value_inc_vat]);
+  const days = [...new Set(slots.map(([f]) => localMidnight(f)))].sort((x, y) => y - x);
+  for (const d0 of days) {
+    const d1 = localMidnight(d0 + 36 * 36e5);  // next local midnight, also across a clock change
+    const part = slots.filter(([f, t]) => f < d1 && t > d0).map(([f, t, v]) => [Math.max(f, d0), Math.min(t, d1), v]).sort((x, y) => x[0] - y[0]);
+    let covered = d0;
+    for (const [f, t] of part) { if (f > covered) break; covered = Math.max(covered, t); }
+    if (covered < d1) continue;  // this day is not fully published yet
+    const pattern = part.map(([f, t, v]) => [minutesOfDay(f), t >= d1 ? 1440 : minutesOfDay(t), v]);
+    const out = [];
+    for (let day = localMidnight(a); day < b; day = localMidnight(day + 36 * 36e5)) {
+      const dt = new Date(day);
+      for (const [m0, m1, v] of pattern) {
+        const s = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0, m0).getTime();
+        const e = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0, m1).getTime();
+        if (Math.max(s, a) < Math.min(e, b)) out.push([Math.max(s, a), Math.min(e, b), v]);
+      }
+    }
+    return out;
+  }
+  return [];
+};
+
 // Cumulative cost (GBP) of one fuel on tariff K over [a0, b0): [[t, total], ...] on that fuel's consumption timestamps, or null when
 // K has no prices for this fuel in the region. Unit rates x usage, plus the daily standing charge accrued smoothly (per reading, in
 // proportion to its length); inc VAT, direct debit. K = 'CURRENT' (or the current tariff's key): the current tariff's own published
@@ -135,23 +165,28 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
     }
     const kind = fuel === 'gas' ? 'gas-tariffs' : 'electricity-tariffs', pfx = fuel === 'gas' ? 'G-1R-' : 'E-1R-';
     const units = [], stand = [];
-    for (const [prod, f, t] of vers) {
+    // Each version's prices are requested per calendar month (UTC), so the URLs stay the same from day to day: months that ended
+    // over a day ago cannot change any more and come from the browser cache. All months of all versions are requested together.
+    const fetched = await Promise.all(vers.map(async ([prod, f, t]) => {
       const a = Math.max(Math.floor(c0 / DAY) * DAY - DAY, f ? Date.parse(f) : -Infinity);
       const b = Math.min(Math.ceil(c1 / DAY) * DAY + DAY, t ? Date.parse(t) : Infinity);
-      if (!(a < b)) continue;
+      if (!(a < b)) return null;
       const base = `${API}${prod}/${kind}/${pfx}${prod}-${reg}/`;
-      const qs = fixed ? '?page_size=1500' : `?period_from=${new Date(a).toISOString()}&period_to=${new Date(b).toISOString()}&page_size=1500`;
-      let u, s;
-      try { [u, s] = await Promise.all([fetchRates(base + 'standard-unit-rates/' + qs), fetchRates(base + 'standing-charges/' + qs)]); } catch { continue; }
-      for (const [arr, dst] of [[u, units], [s, stand]]) for (const x of arr) {
-        if (x.payment_method && x.payment_method !== 'DIRECT_DEBIT') continue;
-        if (fixed) {
-          const nf = Date.parse(x.valid_from), nt = x.valid_to ? Date.parse(x.valid_to) : Infinity;
-          if (nf <= Date.now() && Date.now() < nt) dst.push([a, b, x.value_inc_vat]);
-          continue;
+      const get = (list) => (fixed ? cachedList(base + list + '?page_size=1500')
+        : Promise.all(months(a, b).map(([m0, m1]) => cachedList(`${base}${list}?period_from=${iso(m0)}&period_to=${iso(m1)}&page_size=1500`,
+          m1 < Date.now() - DAY))).then((parts) => parts.flat()));
+      try { return [a, b, ...await Promise.all([get('standard-unit-rates/'), get('standing-charges/')])]; } catch { return null; }
+    }));
+    for (const l of fetched) {
+      if (!l) continue;
+      const [a, b, u, sc] = l;
+      for (const [arr, dst] of [[u, units], [sc, stand]]) {
+        const dd = arr.filter((x) => !x.payment_method || x.payment_method === 'DIRECT_DEBIT');
+        if (fixed) { dst.push(...fixedPrices(dd, a, b)); continue; }
+        for (const x of dd) {
+          const vs = Math.max(a, Date.parse(x.valid_from)), ve = Math.min(b, x.valid_to ? Date.parse(x.valid_to) : b);
+          if (vs < ve) dst.push([vs, ve, x.value_inc_vat]);
         }
-        const vs = Math.max(a, Date.parse(x.valid_from)), ve = Math.min(b, x.valid_to ? Date.parse(x.valid_to) : b);
-        if (vs < ve) dst.push([vs, ve, x.value_inc_vat]);
       }
     }
     if (!units.length) return null;

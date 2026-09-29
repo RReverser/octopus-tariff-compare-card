@@ -229,7 +229,7 @@ class OctopusTariffCompareCard extends HTMLElement {
 
   _destroyCharts() {
     this._main?.destroy(); this._brush?.destroy();
-    this._main = this._brush = null;
+    this._main = this._brush = this._chartKeys = null;
   }
 
   _theme() {
@@ -292,17 +292,21 @@ class OctopusTariffCompareCard extends HTMLElement {
       yaxis: {tickAmount: 2, labels: {formatter: (v) => '£' + v.toFixed(2)}, title: {text: '£/day'}},
       tooltip: {x: {format: 'ddd dd MMM'}, y: {formatter: (v) => '£' + v.toFixed(2)}},
     };
-    // Same tariffs as the charts already show (periodic refresh): update in place. Different set (fuel change): apexcharts keeps
-    // hidden-series state by index across updates, so build fresh charts with each series' visibility set up front.
+    // Charts are always updated in place, so switching fuels does not empty them (which would make the page jump). A different set
+    // of tariffs (fuel change): apexcharts keeps hidden-series state by index across updates, so that state is cleared first and
+    // each series' visibility is passed with the update.
     const keys = view.map((l) => l.key).join();
-    if (this._main && keys === this._chartKeys) {
+    if (keys !== this._chartKeys) {
+      const vis = this._visibleKeys(this._data.mode);
+      main.series.forEach((s, i) => { s.hidden = i > 0 && !vis.has(view[i].key); });
+    }
+    if (this._main) {
+      if (keys !== this._chartKeys) this._main.resetSeries(false, false);
+      this._chartKeys = keys;
       await this._main.updateOptions(main, false, false);
       await this._brush.updateOptions(brush, false, false);
     } else {
-      this._destroyCharts();
       this._chartKeys = keys;
-      const vis = this._visibleKeys(this._data.mode);
-      main.series.forEach((s, i) => { s.hidden = i > 0 && !vis.has(view[i].key); });
       this._main = new ApexCharts(mainEl, main);
       this._brush = new ApexCharts(brushEl, brush);
       await this._main.render();

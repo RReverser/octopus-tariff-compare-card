@@ -163,7 +163,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       this._status('No Octopus Energy meter found: install the Octopus Energy integration, or set electricity / gas entities in the card config.', true);
       return;
     }
-    this._status(this._data ? 'Updating…' : 'Loading…');
+    if (!this._data) this._status('Loading…');  // later refreshes keep showing the chart, so they need no message
     try {
       const a0 = startOfDay(Date.now() - this._config.history_days * DAY), b0 = Date.now();
       const mode = fuels.join('+');
@@ -194,9 +194,8 @@ class OctopusTariffCompareCard extends HTMLElement {
       if (!base) throw new Error('no consumption statistics found for your meter');
       const show = () => {
         if (token !== this._token) return;
-        const left = lines.filter((l) => l.cum === undefined).length;
         this._data = {mode, start: base[0][0], end: base[base.length - 1][0], lines: lines.filter((l) => l.cum !== null)};
-        this._status(left ? `Loading tariffs: ${lines.length - left} of ${lines.length}` : '');
+        this._status('');
         this._redraw();
       };
       if (progressive) {

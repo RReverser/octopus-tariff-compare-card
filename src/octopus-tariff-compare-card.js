@@ -131,6 +131,8 @@ class OctopusTariffCompareCard extends HTMLElement {
       .main .apexcharts-legend-series .price { display: inline-grid; justify-items: start; }
       .main .apexcharts-legend-series .price > * { grid-area: 1 / 1; }
       .main .apexcharts-legend-series .price > .blank { visibility: hidden; }
+      /* Bigger ends of the brush selection on touch screens. */
+      @media (pointer: coarse) { .brush .svg_select_handle_l, .brush .svg_select_handle_r { r: 10px; } }
       .apexcharts-tooltip { color: #000; }
     </style><ha-card>
       <div class="head"><div class="title">${esc(this._config.title || 'Octopus tariff comparison')}</div>
@@ -142,12 +144,32 @@ class OctopusTariffCompareCard extends HTMLElement {
       <div class="brush" id="brush"></div>
     </ha-card>`;
     this.shadowRoot.querySelectorAll('[data-fuel]').forEach((b) => b.addEventListener('click', () => this._toggleFuel(b.dataset.fuel)));
+    const brushEl = this.shadowRoot.getElementById('brush');
     // While the brush is being dragged, only months already loaded are shown: the months it passes over are not fetched, just the
-    // ones it is let go on.
-    this.shadowRoot.getElementById('brush').addEventListener('pointerdown', () => {
+    // ones it is let go on. The end of a touch can arrive only at the touched element (see below), so it is listened for there too.
+    brushEl.addEventListener('pointerdown', (e) => {
       this._dragging = true;
-      addEventListener('pointerup', () => { this._dragging = false; this._updateMain(); }, {once: true, capture: true});
+      const done = () => {
+        if (!this._dragging) return;
+        this._dragging = false;
+        this._updateMain();
+      };
+      for (const t of [window, e.target]) for (const type of ['pointerup', 'pointercancel']) t.addEventListener(type, done, {once: true, capture: true});
     });
+    // apexcharts 4.7 replaces the selection's resize handles after every step of a resize. With a mouse that does not matter, but
+    // touch events keep going to the element the touch started on: once that handle is out of the page, they no longer reach the
+    // window, where the resize listens, so a finger could only move an end by one step at a time. They are passed on to the window
+    // from the old handle.
+    brushEl.addEventListener('touchstart', (e) => {
+      const h = e.target;
+      if (!h.classList?.contains('svg_select_handle') || typeof TouchEvent === 'undefined') return;
+      const pass = (ev) => {
+        if (ev.type !== 'touchmove') for (const type of ['touchmove', 'touchend', 'touchcancel']) h.removeEventListener(type, pass);
+        if (h.isConnected) return;  // still in the page: the event reaches the window by itself
+        dispatchEvent(new TouchEvent(ev.type, {touches: [...ev.touches], targetTouches: [...ev.targetTouches], changedTouches: [...ev.changedTouches], cancelable: true}));
+      };
+      for (const type of ['touchmove', 'touchend', 'touchcancel']) h.addEventListener(type, pass);
+    }, {capture: true});
     if (this._data) this._redraw();
   }
 

@@ -129,13 +129,16 @@ export const fixedPrices = (list, a, b) => {
   return [];
 };
 
+const addMonths = (t, n) => { const d = new Date(t); d.setMonth(d.getMonth() + n); return d.getTime(); };
+
 // Cumulative cost (GBP) of one fuel on tariff K over [a0, b0): [[t, total], ...] on that fuel's consumption timestamps, or null when
 // K has no prices for this fuel in the region. Unit rates x usage, plus the daily standing charge accrued smoothly (per reading, in
 // proportion to its length); inc VAT, direct debit. K = 'CURRENT' (or the current tariff's key): the current tariff's own published
-// rates. Other variable tariffs: the product versions on sale over the window, each with its published rates. Fixed tariffs:
-// today's price of the latest fix, applied to the whole window.
-export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, K) => {
-  const ck = 'cost:' + fuel + ':' + a0 + '-' + b0 + ':' + K;
+// rates. Other variable tariffs: the product versions on sale over the window, each with its published rates. Fixed tariffs, when
+// signup (ms) is known: signed up then and renewed every term, each term on the fix that was on sale when it began, with that
+// product's own published prices. Without signup: today's price of the latest fix, applied to the whole window.
+export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, K, signup = null) => {
+  const ck = 'cost:' + fuel + ':' + a0 + '-' + b0 + ':' + K + ':' + signup;
   return cache[ck] || (cache[ck] = (async () => {
     const attrs = hass.states[rate]?.attributes || {};
     const tariff = attrs.tariff || attrs.tariff_code || '';
@@ -149,7 +152,22 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
     else {
       const now = latest((await imports()).filter((p) => keyOf(p.code) === K));
       if (!now) return null;
-      if (!now.is_variable) { vers = [[now.code, null, null]]; fixed = true; } else {
+      if (!now.is_variable && signup !== null) {
+        // Renewal terms around the sign-up date, covering the consumption window.
+        const term = now.term || 12;
+        let p = signup;
+        while (p > c0) p = addMonths(p, -term);
+        while (addMonths(p, term) <= c0) p = addMonths(p, term);
+        vers = [];
+        for (; p < c1; p = addMonths(p, term)) {
+          const prod = latest((await imports(p)).filter((x) => keyOf(x.code) === K && !x.is_variable));
+          if (!prod) {  // no such fix was on sale when this term would have begun: the line would be incomplete, so leave it out
+            console.warn(`octopus-tariff-compare-card: no ${K} fix was on sale on ${iso(p)}`);
+            return null;
+          }
+          vers.push([prod.code, iso(p), iso(addMonths(p, term))]);
+        }
+      } else if (!now.is_variable) { vers = [[now.code, null, null]]; fixed = true; } else {
         vers = [];
         let t = c0 - 864e5;
         for (let i = 0; i < 24 && t < c1; i++) {

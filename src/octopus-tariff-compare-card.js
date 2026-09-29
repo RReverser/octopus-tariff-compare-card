@@ -6,6 +6,7 @@
 // never refetches anything.
 import ApexCharts from 'apexcharts';
 import {FUELS, curKey, families, fuelCost, merge, thin, detectEntities, newCache} from './octopus.js';
+import {agreementStarts} from './agreements.js';
 
 const VERSION = '0.1.0';
 const COLORS = {VAR: '#607d8b', SILVER: '#4caf50', AGILE: '#ff9800', 'OE-FIX-12M': '#e91e63', 'OE-FIX-18M': '#9c27b0'};
@@ -167,10 +168,12 @@ class OctopusTariffCompareCard extends HTMLElement {
       const mode = fuels.join('+');
       const cur = Object.fromEntries(fuels.map((f) => { const a = hass.states[ents[f].rate]?.attributes || {}; return [f, curKey(a.tariff || a.tariff_code)]; }));
       const a = hass.states[ents[fuels[0]].rate]?.attributes || {};
-      const fams = await families((a.tariff || a.tariff_code || '').slice(-1));
+      const [fams, starts] = await Promise.all([families((a.tariff || a.tariff_code || '').slice(-1)), agreementStarts(hass)]);
+      // Fixes are priced as if taken when the current agreement for that fuel began.
+      const signup = Object.fromEntries(fuels.map((f) => { const x = hass.states[ents[f].rate]?.attributes || {}; return [f, starts[x.tariff || x.tariff_code] ?? null]; }));
       const cache = newCache();
       const total = async (K) => {
-        const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K)));
+        const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K, signup[f])));
         return parts.some((p) => !p) ? null : parts.reduce(merge);
       };
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;

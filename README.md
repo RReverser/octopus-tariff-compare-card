@@ -58,7 +58,8 @@ Everything is optional:
 - Consumption is read from Home Assistant's long-term statistics: hourly, plus 5-minute data for the most recent part.
 - Each tariff's unit rates and standing charges come from the Octopus products API for your region, direct debit, inc. VAT.
   - Variable tariffs follow their published price history, version by version.
-  - Fixed tariffs use the price you could sign up for today across the whole period, since that is what switching now would get you. Time-of-use fixes (such as Cosy or Go fixed) repeat today's published daily pattern of cheap and peak slots on every day, by local time.
+  - Fixed tariffs are priced as if you had signed up when your current supply agreement started, and renewed at the end of every term: each term uses the fix that was on sale when it began, with that product's own published prices (including its time-of-use slots). The agreement start comes from the Octopus Energy integration's diagnostics, which only admin users can read; building them makes the integration query your Octopus account, so the card keeps just the agreement start dates in the browser for a day. A fix with no product on sale at one of those dates is left out.
+  - Without that date (a non-admin user), fixed tariffs use the price you could sign up for today across the whole period. Time-of-use fixes (such as Cosy or Go fixed) then repeat today's published daily pattern of slots on every day, by local time.
   - Your current tariff uses its own published prices.
 - The standing charge is spread evenly over time.
 - Prices are requested per calendar month. Months that have ended are cached by the browser beyond the API's 5-minute limit, so they are not downloaded again on later visits.

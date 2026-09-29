@@ -51,7 +51,7 @@ class OctopusTariffCompareCard extends HTMLElement {
   connectedCallback() {
     clearInterval(this._timer);
     this._timer = setInterval(() => this._refresh(), REFRESH_MS);
-    if (this._hass && this._data && !this._main) this._draw();
+    if (this._hass && this._data && !this._main) this._redraw();
   }
 
   disconnectedCallback() {
@@ -132,7 +132,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       <div class="brush" id="brush"></div>
     </ha-card>`;
     this.shadowRoot.querySelectorAll('[data-fuel]').forEach((b) => b.addEventListener('click', () => this._toggleFuel(b.dataset.fuel)));
-    if (this._data) this._draw();
+    if (this._data) this._redraw();
   }
 
   _toggleFuel(fuel) {
@@ -183,14 +183,27 @@ class OctopusTariffCompareCard extends HTMLElement {
       for (const f of fams) {
         if (fuels.every((fu) => f.fuels.includes(fu[0])) && !(same && f.key === cur[fuels[0]])) lines.push({key: f.key, label: f.label, colour: colour(f.key)});
       }
-      const results = await Promise.all(lines.map((l) => total(l.key)));
+      // Every tariff is costed in parallel. On a first load or a fuel change, the chart appears as soon as the current tariff (the
+      // baseline every line is drawn against) is ready, and each other line joins as soon as its own prices are in; the legend
+      // lists the rest as pending. A periodic refresh keeps showing the previous figures and swaps them in once all are done.
+      const progressive = this._data?.mode !== mode;
+      const pending = lines.map((l) => total(l.key).then((cum) => { l.cum = cum; return cum; }));
+      const base = await pending[0];
       if (token !== this._token) return;
-      if (!results[0]) throw new Error('no consumption statistics found for your meter');
-      const base = results[0];
-      this._data = {mode, start: base[0][0], end: base[base.length - 1][0],
-        lines: lines.map((l, i) => ({...l, cum: results[i]})).filter((l) => l.cum)};
-      this._draw();
-      this._status('');
+      if (!base) throw new Error('no consumption statistics found for your meter');
+      const show = () => {
+        if (token !== this._token) return;
+        const left = lines.filter((l) => l.cum === undefined).length;
+        this._data = {mode, start: base[0][0], end: base[base.length - 1][0], lines: lines.filter((l) => l.cum !== null)};
+        this._status(left ? `Loading tariffs: ${lines.length - left} of ${lines.length}` : '');
+        this._redraw();
+      };
+      if (progressive) {
+        show();
+        for (const p of pending.slice(1)) p.then(show, () => {});
+      }
+      await Promise.all(pending);
+      show();
     } catch (err) {
       if (token === this._token) this._status('Could not load: ' + (err.message || err), true);
     }
@@ -201,6 +214,7 @@ class OctopusTariffCompareCard extends HTMLElement {
     const {lines} = this._data, base = lines[0].cum;
     const i0 = idxAt(base, a), i1 = idxAt(base, b);
     return lines.map((l) => {
+      if (!l.cum) return {...l, points: [], total: null};  // still loading
       const c = l.cum, pts = [];
       for (let j = i0; j <= i1; j++) pts.push([c[j][0], Math.round(((c[j][1] - c[i0][1]) - (base[j][1] - base[i0][1])) * 100) / 100]);
       return {...l, points: thin(pts, MAX_POINTS), total: c[i1][1] - c[i0][1]};
@@ -255,6 +269,14 @@ class OctopusTariffCompareCard extends HTMLElement {
     });
   }
 
+  // Draws are serialised: a draw requested while one is running happens once it finishes (coalescing any number of requests).
+  _redraw() {
+    if (this._drawing) { this._drawAgain = true; return; }
+    this._drawing = (async () => {
+      try { do { this._drawAgain = false; await this._draw(); } while (this._drawAgain); } finally { this._drawing = null; }
+    })();
+  }
+
   async _draw() {
     const mainEl = this.shadowRoot?.getElementById('main'), brushEl = this.shadowRoot?.getElementById('brush');
     if (!mainEl || !this._data) return;
@@ -270,7 +292,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       markers: {size: 0}, dataLabels: {enabled: false}, grid: {borderColor: th.grid},
       legend: {position: 'top', fontSize: '14px', itemMargin: {horizontal: 10, vertical: 4}, onItemClick: {toggleDataSeries: false},
         // Plain text only: apexcharts ignores clicks whose target is an element inside the legend text.
-        formatter: (name, o) => `${name}  £${(this._viewLines[o.seriesIndex]?.total ?? 0).toFixed(2)}`},
+        formatter: (name, o) => { const t = this._viewLines[o.seriesIndex]?.total; return `${name}  ${t == null ? '…' : '£' + t.toFixed(2)}`; }},
       xaxis: {type: 'datetime', min: a, max: b, labels: {datetimeUTC: false}},
       yaxis: {min: () => -this._yRange(), max: () => this._yRange(), tickAmount: 6, labels: {formatter: (v) => v.toFixed(2)},
         title: {text: '£ vs current tariff (+ = dearer)'}},

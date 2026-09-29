@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Octopus Tariff Compare card test page</title>
+<style>body { margin: 0; padding: 16px; width: 1200px; font-family: sans-serif; --primary-text-color: #212121; --divider-color: #e0e0e0; } ha-card { display: block; }</style>
+<script type="module">
+  // A fake Home Assistant for one scenario of tests/fake/world.mjs (?scenario=...), and the card built by `npm run build`.
+  import {SCENARIOS, statistics, historyStart, TARIFF, SIGNUP} from './fake/world.mjs';
+  import '../dist/octopus-tariff-compare-card.js';
+
+  const s = SCENARIOS[new URLSearchParams(location.search).get('scenario')];
+  const id = (fuel, what) => `sensor.octopus_energy_${fuel}_19l1234567_1234567890123_${what}`;
+  const states = {}, meters = {};
+  for (const fuel of s.fuels) {
+    states[id(fuel, 'current_rate')] = {entity_id: id(fuel, 'current_rate'), state: '0.24', attributes: {tariff: TARIFF[fuel]}};
+    const c = id(fuel, fuel === 'gas' ? 'current_total_consumption_kwh' : 'current_total_consumption');
+    states[c] = {entity_id: c, state: '123', attributes: {}};
+    meters[c] = fuel;
+  }
+  window.wsCalls = [];
+  const hass = {
+    states, entities: {}, user: {is_admin: s.admin}, themes: {darkMode: false},
+    async callWS(msg) {
+      window.wsCalls.push(msg.type);
+      if (msg.type === 'recorder/statistics_during_period') {
+        const [sid] = msg.statistic_ids;
+        return {[sid]: statistics(meters[sid], historyStart(s), msg.period, Date.parse(msg.start_time), Date.parse(msg.end_time))};
+      }
+      if (msg.type === 'config_entries/get') return [{entry_id: 'account', domain: 'octopus_energy', state: 'loaded'}];
+      throw new Error('unexpected ' + msg.type);
+    },
+    async callApi(method, path) {
+      if (!s.admin) throw new Error('401 Unauthorized');
+      if (path !== 'diagnostics/config_entry/account') throw new Error('unexpected ' + path);
+      const points = (fuel) => [{agreements: [{tariff_code: TARIFF[fuel], start: new Date(SIGNUP).toISOString(), end: null}]}];
+      return {data: {account: {electricity_meter_points: s.fuels.includes('electricity') ? points('electricity') : [],
+        gas_meter_points: s.fuels.includes('gas') ? points('gas') : []}}};
+    },
+  };
+  const card = document.createElement('octopus-tariff-compare-card');
+  card.setConfig({...(s.config || {})});
+  document.body.append(card);
+  card.hass = hass;
+  window.card = card;
+</script>

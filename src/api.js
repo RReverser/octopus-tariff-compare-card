@@ -11,7 +11,9 @@ const MAX_INFLIGHT = 6;
 let inflight = 0;
 const waiting = [];
 const acquire = () => (inflight < MAX_INFLIGHT ? (inflight++, Promise.resolve()) : new Promise((r) => waiting.push(r)));
-const release = () => { const next = waiting.shift(); if (next) next(); else inflight--; };  // a freed slot passes straight to a waiter
+// A freed slot passes straight to the newest waiter: when the brush moves on, the months it is on now are fetched before any it
+// passed over earlier.
+const release = () => { const next = waiting.pop(); if (next) next(); else inflight--; };
 
 // One page as JSON. immutable: the page cannot change any more, so any cached copy is used, however old.
 export const getJSON = async (url, immutable = false) => {
@@ -39,7 +41,14 @@ export const fetchAll = async (url, immutable = false) => {
   return res;
 };
 
-// Lists by URL for the page's lifetime; a failed fetch is forgotten so the next refresh retries it.
+// Lists by URL: for the page's lifetime if immutable, else for as long as the API allows caching them (5 minutes), so a refresh
+// sees newly published prices. A failed fetch is forgotten so the next refresh retries it.
+const FRESH_MS = 5 * 60e3;
 const memo = {};
-export const cachedList = (url, immutable = false) =>
-  memo[url] || (memo[url] = fetchAll(url, immutable).catch((e) => { delete memo[url]; throw e; }));
+export const cachedList = (url, immutable = false) => {
+  const m = memo[url];
+  if (m && (immutable || Date.now() - m.t < FRESH_MS)) return m.p;
+  const p = fetchAll(url, immutable).catch((e) => { if (memo[url]?.p === p) delete memo[url]; throw e; });
+  memo[url] = {p, t: Date.now()};
+  return p;
+};

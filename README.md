@@ -62,7 +62,8 @@ Everything is optional:
   - Without that date (a non-admin user), fixed tariffs use the price you could sign up for today across the whole period. Time-of-use fixes (such as Cosy or Go fixed) then repeat today's published daily pattern of slots on every day, by local time.
   - Your current tariff uses its own published prices.
 - The standing charge is spread evenly over time.
-- Prices are requested per calendar month. Months that have ended are cached by the browser beyond the API's 5-minute limit, so they are not downloaded again on later visits.
+- Prices are requested per calendar month, and only when needed: your current tariff for the whole history (for the lower chart), every other tariff only for the months the selected period covers. Moving the selection to months not seen yet loads them when you let go of it; each line appears once its prices are in.
+- Months that have ended are cached by the browser beyond the API's 5-minute limit, so they are not downloaded again on later visits. The current month is priced again on every refresh (every 15 minutes).
 - The results are estimates from published prices and your recorded usage; your bills may differ, for example from meter reading timing or rounding.
 
 ## Known limitations
@@ -77,7 +78,10 @@ Everything is optional:
 npm install
 npm run build      # dist/octopus-tariff-compare-card.js, with ApexCharts bundled
 npm run build:dev  # build/…dev.js, loading ApexCharts from jsDelivr (small file for quick testing)
+npm test           # build, then run the Playwright tests
 ```
+
+The tests (`tests/`) run the built card in Chromium against a fake Home Assistant and a fake Octopus API serving made-up products and usage (`tests/fake/world.mjs`): a short and a two-year history, admin and non-admin users, one or both fuels. They check every tariff's total against costs worked out independently from the same made-up prices (`tests/fake/reference.mjs`), and cover the tooltips, unavailable tariffs, fuel switching without layout changes, lazy loading of months as the selection moves, the selection staying within the data, fixed-tariff renewals, and refreshes. `npx playwright install chromium` fetches the browser if you do not have it.
 
 ApexCharts is pinned to 4.7.0, the last MIT-licensed release.
 

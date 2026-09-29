@@ -1,11 +1,12 @@
 // Octopus Tariff Compare card for Home Assistant: what your own metered usage would have cost on every Octopus Energy import tariff
 // available in your region, as a running difference against the tariff you are on now.
 //
-// The whole history (default: the last year) is costed once per tariff as a running total. The brush chart under the main chart
-// picks the period; since every line is a running total, a period's figures are differences within that data, so moving the brush
-// never refetches anything.
+// Costs are worked out per calendar month (UTC), per fuel and tariff, and kept for the page's lifetime. Your current tariff is costed
+// over the whole history (default: the last year), for the brush chart under the main chart, which picks the period. Other tariffs
+// are costed only for the months the selected period covers: moving the brush to months not seen yet loads them, and each line
+// appears once its months are in.
 import ApexCharts from 'apexcharts';
-import {FUELS, curKey, families, fuelCost, merge, thin, detectEntities, newCache} from './octopus.js';
+import {FUELS, curKey, families, consumption, months, priceMonth, merge, thin, detectEntities} from './octopus.js';
 import {agreementStarts} from './agreements.js';
 
 const VERSION = '0.1.0';
@@ -13,7 +14,9 @@ const COLORS = {VAR: '#607d8b', SILVER: '#4caf50', AGILE: '#ff9800', 'OE-FIX-12M
 const EXTRA = ['#2196f3', '#00bcd4', '#795548', '#cddc39', '#ff5722', '#3f51b5', '#009688', '#ffc107', '#8bc34a', '#f44336', '#673ab7'];
 const MAX_POINTS = 1000;  // per line in the main chart; lines are running totals, so thinning keeps their shape
 const REFRESH_MS = 15 * 60e3;
-const DAY = 864e5;
+const DAY = 864e5, HOUR = 36e5;
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const utcMonth = (t) => { const d = new Date(t); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); };
 const DEFAULTS = {default_visible: ['OE-FIX-12M', 'OE-FIX-18M', 'SILVER'], default_days: 30, default_fuel: 'electricity',
   history_days: 365, height: 380, brush_height: 110};
 
@@ -139,6 +142,12 @@ class OctopusTariffCompareCard extends HTMLElement {
       <div class="brush" id="brush"></div>
     </ha-card>`;
     this.shadowRoot.querySelectorAll('[data-fuel]').forEach((b) => b.addEventListener('click', () => this._toggleFuel(b.dataset.fuel)));
+    // While the brush is being dragged, only months already loaded are shown: the months it passes over are not fetched, just the
+    // ones it is let go on.
+    this.shadowRoot.getElementById('brush').addEventListener('pointerdown', () => {
+      this._dragging = true;
+      addEventListener('pointerup', () => { this._dragging = false; this._updateMain(); }, {once: true, capture: true});
+    });
     if (this._data) this._redraw();
   }
 
@@ -160,7 +169,10 @@ class OctopusTariffCompareCard extends HTMLElement {
     el.classList.toggle('error', error);
   }
 
-  // ---- data: cost the whole history once per tariff ----
+  // ---- data ----
+  // Loads your usage and the tariff list, then your current tariff's cost for every month of the history. Other tariffs are costed
+  // on demand by _view. Periodic refreshes (new usage) recompute only months that can still change, and keep showing the previous
+  // figures until then.
   async _refresh() {
     if (!this._hass || !this._config || !this.shadowRoot) return;
     const token = (this._token = (this._token || 0) + 1);
@@ -171,25 +183,22 @@ class OctopusTariffCompareCard extends HTMLElement {
     }
     if (!this._data) this._status('Loading…');  // later refreshes keep showing the chart, so they need no message
     try {
-      const a0 = startOfDay(Date.now() - this._config.history_days * DAY), b0 = Date.now();
-      const mode = fuels.join('+');
-      const cur = Object.fromEntries(fuels.map((f) => { const a = hass.states[ents[f].rate]?.attributes || {}; return [f, curKey(a.tariff || a.tariff_code)]; }));
-      const a = hass.states[ents[fuels[0]].rate]?.attributes || {};
-      const [fams, starts] = await Promise.all([families((a.tariff || a.tariff_code || '').slice(-1)), agreementStarts(hass)]);
-      // Fixes are priced as if taken when the current agreement for that fuel began.
-      const signup = Object.fromEntries(fuels.map((f) => { const x = hass.states[ents[f].rate]?.attributes || {}; return [f, starts[x.tariff || x.tariff_code] ?? null]; }));
-      const cache = newCache();
-      const cap = (f) => f[0].toUpperCase() + f.slice(1);
-      // Both fuels' costs of tariff K, summed (null if either is missing), with the legend tooltip lines saying what each was priced
-      // from, and the first reason a fuel could not be priced.
-      const total = async (K) => {
-        const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K, signup[f])));
-        // One line per fuel (what it was priced from, or why it could not be), merged into a single unlabelled line when all fuels
-        // have the same one.
-        const texts = parts.map((p) => (p.cum ? p.basis.map(cap).join('\n') : cap(p.why)));
-        const tip = texts.every((x) => x === texts[0]) ? [texts[0]] : texts.map((x, i) => `${cap(fuels[i])}: ${x.replace(/\n/g, '\n    ')}`);
-        return {cum: parts.every((p) => p.cum) ? parts.map((p) => p.cum).reduce(merge) : null, tip};
-      };
+      const now = Date.now(), a0 = startOfDay(now - this._config.history_days * DAY);
+      const attrs = (f) => hass.states[ents[f].rate]?.attributes || {};
+      const tariff = (f) => attrs(f).tariff || attrs(f).tariff_code || '';
+      const cur = Object.fromEntries(fuels.map((f) => [f, curKey(tariff(f))]));
+      const [fams, starts, usage] = await Promise.all([families(tariff(fuels[0]).slice(-1)), agreementStarts(hass),
+        Promise.all(fuels.map((f) => consumption(hass, ents[f].consumption, a0, now)))]);
+      if (usage.some((u) => !u.length)) throw new Error('no consumption statistics found for your meter');
+      // Readings by fuel and calendar month (UTC, the months prices are requested in; readings never cross a month boundary).
+      const byMonth = {};
+      fuels.forEach((f, i) => {
+        const m = (byMonth[f] = new Map());
+        for (const r of usage[i]) { const k = utcMonth(r[0]); if (!m.has(k)) m.set(k, []); m.get(k).push(r); }
+      });
+      // What pricing a fuel needs besides the tariff: region, current product, and (for fixes) when the current agreement began.
+      const ctx = Object.fromEntries(fuels.map((f, i) => [f, {fuel: f, reg: tariff(f).slice(-1), curProd: tariff(f).split('-').slice(2, -1).join('-'),
+        signup: starts[tariff(f)] ?? null, dataStart: usage[i][0][0]}]));
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;
       const nameOf = (k) => (fams.find((f) => f.key === k) || {}).name || k;
       const colour = (k) => COLORS[k] || EXTRA[Math.max(0, fams.findIndex((f) => f.key === k)) % EXTRA.length];
@@ -204,58 +213,103 @@ class OctopusTariffCompareCard extends HTMLElement {
         const na = fuels.every((fu) => f.fuels.includes(fu[0])) ? null : `Not offered for ${fuels.filter((fu) => !f.fuels.includes(fu[0])).join(' and ')}`;
         lines.push({key: f.key, label: f.label, colour: colour(f.key), na, head: nameOf(f.key)});
       }
-      // Every tariff is costed in parallel. On a first load or a fuel change, the chart appears as soon as the current tariff (the
-      // baseline every line is drawn against) is ready, and each other line joins as soon as its own prices are in; the legend
-      // lists the rest as pending. A periodic refresh keeps showing the previous figures and swaps them in once all are done.
-      const progressive = this._data?.mode !== mode;
-      // Legend tooltip: the full product name and code, then what it was priced from (or why it could not be).
-      const pending = lines.map((l) => {
-        // Unavailable: the reason, then the product key in place of a version's code.
-        l.tip = l.na ? `${l.head}\n${l.na}\nCode: ${l.key}` : l.head;
-        if (l.na) return Promise.resolve(l.cum = null);
-        return total(l.key).then((r) => {
-          l.cum = r.cum;
-          if (!r.cum) l.na = 'Cannot be priced';
-          l.tip = [l.head, ...r.tip, ...(r.cum ? [] : [`Code: ${l.key}`])].join('\n');
-          return r.cum;
-        });
-      });
-      const base = await pending[0];
+      const data = {mode: fuels.join('+'), fuels, lines, ctx, byMonth, gen: (this._gen = (this._gen || 0) + 1),
+        start: Math.min(...usage.map((u) => u[0][0])), end: Math.max(...usage.map((u) => u[u.length - 1][1]))};
+      // The current tariff over the whole history: the baseline of every line, and the brush chart.
+      const all = [];
+      for (const f of fuels) for (const [m0, m1] of months(data.start, data.end)) if (byMonth[f].has(m0)) all.push(this._month(data, 'CURRENT', f, m0, m1).p);
+      await Promise.all(all);
       if (token !== this._token) return;
-      if (!base) throw new Error('no consumption statistics found for your meter');
-      const show = () => {
-        if (token !== this._token) return;
-        this._data = {mode, start: base[0][0], end: base[base.length - 1][0], lines};
-        this._status('');
-        this._redraw();
-      };
-      if (progressive) {
-        show();
-        for (const p of pending.slice(1)) p.then(show, () => {});
-      }
-      await Promise.all(pending);
-      show();
+      const base = this._cost(data, lines[0], data.start, data.end, false);
+      if (!base.cum) throw new Error(base.why ? 'your current tariff: ' + base.why : 'could not price your current tariff');
+      this._data = data;
+      this._status('');
+      this._redraw();
     } catch (err) {
       if (token === this._token) this._status('Could not load: ' + (err.message || err), true);
     }
   }
 
-  // Lines for period [a, b]: running difference vs the current tariff from a, thinned; totals over the period.
+  // One month's cost of tariff K for one fuel, from the page-lifetime store: {val, p}. val is the result once loaded
+  // ({rows, basis} or {why}); p is the pending load. Months that ended over a day ago are loaded once; later months again on every
+  // refresh (their val keeps the previous result until then), and so is a month whose load failed.
+  _month(data, K, fuel, m0, m1) {
+    const c = data.ctx[fuel];
+    const key = [fuel, c.reg, c.curProd, c.signup, K, m0].join('|');
+    const store = (this._store ||= new Map());
+    let e = store.get(key);
+    if (!e) store.set(key, (e = {}));
+    // Only a newer refresh reloads a month: views of the data being replaced keep using what is there.
+    const settled = m1 < Date.now() - DAY && e.val && !e.failed;
+    if (e.gen !== undefined && (e.gen >= data.gen || settled)) return e;
+    e.gen = data.gen;
+    const p = (e.p = priceMonth({...c, K}, m0, m1, data.byMonth[fuel].get(m0) || []).then(
+      (v) => ({v, failed: false}), (err) => ({v: {why: 'could not load prices: ' + (err.message || err)}, failed: true})).then(({v, failed}) => {
+      if (e.p !== p) return;
+      e.val = v; e.failed = failed;
+      if (data === this._data) this._dataArrived();
+    }));
+    return e;
+  }
+
+  // Cost of a line over (a, b]: {cum: [[t, GBP running total from a], ...] on the readings' end times, basis: {fuel: [tooltip line]}},
+  // {why} if a month cannot be priced, or {pending: true} while months are loading (load: start loading them).
+  _cost(data, l, a, b, load = true) {
+    const parts = [], basis = {};
+    let pending = false, why = null;
+    for (const f of data.fuels) {
+      const got = [];
+      for (const [m0, m1] of months(a - HOUR, b)) {
+        if (!data.byMonth[f].has(m0)) continue;
+        const e = load ? this._month(data, l.key, f, m0, m1) : this._store?.get([f, data.ctx[f].reg, data.ctx[f].curProd, data.ctx[f].signup, l.key, m0].join('|'));
+        if (!e?.val) { pending = true; continue; }
+        if (e.val.why) { why ||= e.val.why; continue; }
+        got.push(e.val);
+      }
+      const cum = [[a, 0]];
+      let sum = 0;
+      for (const v of got) for (const [t, gbp] of v.rows) if (t > a && t <= b) { sum += gbp; cum.push([t, sum]); }
+      parts.push(cum);
+      basis[f] = [...new Set(got.flatMap((v) => v.basis))];
+    }
+    if (why) return {why};
+    if (pending) return {pending: true};
+    return {cum: parts.reduce(merge), basis};
+  }
+
+  // Legend tooltip lines after the name: what each fuel was priced from, merged into one unlabelled block when all fuels share it.
+  _tipLines(fuels, texts) {
+    return texts.every((x) => x === texts[0]) ? [texts[0]] : texts.map((x, i) => `${cap(fuels[i])}: ${x.replace(/\n/g, '\n    ')}`);
+  }
+
+  // Lines for period [a, b]: running difference vs the current tariff from a, thinned; totals over the period; tooltip; unavailable
+  // (na) with the reason; or still loading (no points, no total).
   _view(a, b) {
-    const {lines} = this._data, base = lines[0].cum;
-    const i0 = idxAt(base, a), i1 = idxAt(base, b);
-    return lines.map((l) => {
-      if (!l.cum) return {...l, points: [], total: null};  // still loading
-      const c = l.cum, pts = [];
-      for (let j = i0; j <= i1; j++) pts.push([c[j][0], Math.round(((c[j][1] - c[i0][1]) - (base[j][1] - base[i0][1])) * 100) / 100]);
-      return {...l, points: thin(pts, MAX_POINTS), total: c[i1][1] - c[i0][1]};
+    const d = this._data, load = !this._dragging;
+    const base = this._cost(d, d.lines[0], a, b, load);
+    const bc = base.cum || [[a, 0]];
+    return d.lines.map((l, i) => {
+      if (l.na) return {...l, points: [], total: null, tip: `${l.head}\n${l.na}\nCode: ${l.key}`};
+      const r = i === 0 ? base : this._cost(d, l, a, b, load);
+      if (r.why) return {...l, na: 'Cannot be priced', points: [], total: null, tip: `${l.head}\n${cap(r.why)}\nCode: ${l.key}`};
+      if (!r.cum || !base.cum) return {...l, points: [], total: null, tip: `${l.head}\nLoading prices…`};
+      const pts = bc.map(([t, v]) => [t, Math.round((r.cum[idxAt(r.cum, t)][1] - v) * 100) / 100]);
+      const tip = [l.head, ...this._tipLines(d.fuels, d.fuels.map((f) => r.basis[f].map(cap).join('\n')))].join('\n');
+      return {...l, points: thin(pts, MAX_POINTS), total: r.cum[r.cum.length - 1][1], tip};
     });
+  }
+
+  // Prices for more months arrived: update the main chart once for all that arrive together.
+  _dataArrived() {
+    if (this._arrivalQueued) return;
+    this._arrivalQueued = true;
+    queueMicrotask(() => { this._arrivalQueued = false; this._updateMain(); });
   }
 
   // Daily cost on the current tariff, for the brush chart, running to the latest data. Partial first and last
   // days are scaled to a per-day rate so they are comparable with whole days.
   _daily() {
-    const {start, end} = this._data, base = this._data.lines[0].cum, out = [];
+    const {start, end} = this._data, base = this._cost(this._data, this._data.lines[0], start, end, false).cum, out = [];
     for (let t = startOfDay(start); t < end; t += DAY) {
       const t0 = Math.max(t, start), t1 = Math.min(t + DAY, end);
       const cost = base[idxAt(base, t1)][1] - base[idxAt(base, t0)][1];
@@ -327,7 +381,7 @@ class OctopusTariffCompareCard extends HTMLElement {
   _redraw() {
     if (this._drawing) { this._drawAgain = true; return; }
     this._drawing = (async () => {
-      try { do { this._drawAgain = false; await this._draw(); } while (this._drawAgain); } finally { this._drawing = null; }
+      try { do { this._drawAgain = false; await this._updating; await this._draw(); } while (this._drawAgain); } finally { this._drawing = null; }
     })();
   }
 
@@ -396,8 +450,8 @@ class OctopusTariffCompareCard extends HTMLElement {
     this._applyVisibility();
   }
 
-  // Brush moved or resized: re-base the lines on the new period start and update the totals (throttled to one frame).
-  // The period is read from the selection rectangle itself: apexcharts' resize events report the size from before the change.
+  // Brush moved or resized: store the new period and update the main chart (throttled to one frame). The period is read from the
+  // selection rectangle itself: apexcharts' resize events report the size from before the change.
   _onBrush(s) {
     if (!this._data) return;
     this._pendingSel = s?.xaxis;
@@ -407,10 +461,27 @@ class OctopusTariffCompareCard extends HTMLElement {
       const [a, b] = this._brushRange();
       if (!(a < b)) return;
       this._setPeriod(a, b);
-      this._viewLines = this._view(a, b);
-      this._main.updateOptions({...this._mainSeriesOptions(this._viewLines), xaxis: {min: a, max: b}}, false, false)
-        .then(() => this._applyVisibility());
+      this._updateMain();
     });
+  }
+
+  // Main chart only (lines, totals, x range) for the stored period; the brush chart is left alone, so a drag in progress is not
+  // disturbed. Serialised like _redraw, and folded into a full redraw when one is running.
+  _updateMain() {
+    if (this._drawing) { this._drawAgain = true; return; }
+    if (this._updating) { this._updateAgain = true; return; }
+    this._updating = (async () => {
+      try {
+        do {
+          this._updateAgain = false;
+          if (!this._main || !this._data) return;
+          const [a, b] = this._period();
+          this._viewLines = this._view(a, b);
+          await this._main.updateOptions({...this._mainSeriesOptions(this._viewLines), xaxis: {min: a, max: b}}, false, false);
+          this._applyVisibility();
+        } while (this._updateAgain);
+      } finally { this._updating = null; }
+    })();
   }
 
   _brushRange() {

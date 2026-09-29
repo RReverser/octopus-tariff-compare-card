@@ -5,13 +5,15 @@
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
-    "build:dev": "BUILD=dev rollup -c"
+    "build:dev": "BUILD=dev rollup -c",
+    "test": "npm run build && playwright test"
   },
   "license": "MIT",
   "dependencies": {
     "apexcharts": "4.7.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-terser": "^1.0.0",
     "rollup": "^4.63.5"

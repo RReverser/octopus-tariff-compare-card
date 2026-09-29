@@ -150,12 +150,14 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
     const fail = (why) => ({cum: null, basis: [], why});
     if (!cons.length) return fail('no consumption statistics');
     const c0 = cons[0][0], c1 = cons[cons.length - 1][1];
+    // Tooltip lines: readable dates first, the product code on its own line.
+    const onSale = (f, t) => `On sale ${t ? `${f ? fmtDate(f) : '?'} to ${fmtDate(t)}` : `since ${f ? fmtDate(f) : '?'}`}`;
     // Product versions used over the window, with the dates each was on sale: [[code, from, to], ...] (ISO or null).
-    const saleBasis = (vs) => vs.map(([code, f, t]) => `${code}, on sale ${t ? `${f ? fmtDate(f) : '?'} to ${fmtDate(t)}` : `since ${f ? fmtDate(f) : '?'}`}`);
+    const saleBasis = (vs) => vs.map(([code, f, t]) => `${onSale(f, t)}\nCode: ${code}`);
     let vers, fixed = false, basis;
     if (K === 'CURRENT' || K === keyOf(curProd)) {
       vers = [[curProd, null, null]];
-      basis = [`your tariff${signup !== null ? ' since ' + fmtDate(signup) : ''}: ${curProd}`];
+      basis = [`Your tariff${signup !== null ? ' since ' + fmtDate(signup) : ''}\nCode: ${curProd}`];
     } else if (K === 'SILVER') {
       vers = TRACKER;
       basis = saleBasis(TRACKER.filter(([, f, t]) => (!f || Date.parse(f) < c1) && (!t || Date.parse(t) > c0)));
@@ -176,13 +178,13 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
         for (let first = true; p < c1; p = addMonths(p, term), first = false) {
           const prod = latest((await imports(p)).filter((x) => keyOf(x.code) === K && !x.is_variable));
           // No such fix was on sale when this term would have begun: the line would be incomplete, so leave it out.
-          if (!prod) return fail(`no ${K} fix was on sale on ${when(p)}, when a term would have begun`);
+          if (!prod) return fail(`Not on sale on the presumed ${first ? 'sign-up' : 'renewal'} date, ${when(p)}`);
           vers.push([prod.code, iso(p), iso(addMonths(p, term))]);
-          basis.push(`${first ? 'signed up' : 'renewed'} ${when(p)}: ${prod.code}, on sale since ${fmtDate(prod.available_from)}`);
+          basis.push(`Presumed ${first ? 'sign-up' : 'renewal'}: ${when(p)}\n${onSale(prod.available_from)}\nCode: ${prod.code}`);
         }
       } else if (!now.is_variable) {
         vers = [[now.code, null, null]]; fixed = true;
-        basis = [`${now.code}, on sale since ${fmtDate(now.available_from)}: its current prices over the whole period (sign-up date unknown)`];
+        basis = [`Sign-up date unknown: current prices used throughout\n${onSale(now.available_from)}\nCode: ${now.code}`];
       } else {
         vers = [];
         const sale = [];

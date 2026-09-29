@@ -150,12 +150,16 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
     const fail = (why) => ({cum: null, basis: [], why});
     if (!cons.length) return fail('no consumption statistics');
     const c0 = cons[0][0], c1 = cons[cons.length - 1][1];
-    // Versions of the product used over the window, each from a date (clipped to the window) as "CODE from DATE".
-    const versionBasis = (vs) => vs.filter(([, f, t]) => (!f || Date.parse(f) < c1) && (!t || Date.parse(t) > c0))
-      .map(([code, f]) => `${code} from ${fmtDate(Math.max(c0, f ? Date.parse(f) : c0))}`);
+    // Product versions used over the window, with the dates each was on sale: [[code, from, to], ...] (ISO or null).
+    const saleBasis = (vs) => vs.map(([code, f, t]) => `${code}, on sale ${t ? `${f ? fmtDate(f) : '?'} to ${fmtDate(t)}` : `since ${f ? fmtDate(f) : '?'}`}`);
     let vers, fixed = false, basis;
-    if (K === 'CURRENT' || K === keyOf(curProd)) { vers = [[curProd, null, null]]; basis = [`your tariff, ${tariff}`]; }
-    else if (K === 'SILVER') { vers = TRACKER; basis = versionBasis(TRACKER); }
+    if (K === 'CURRENT' || K === keyOf(curProd)) {
+      vers = [[curProd, null, null]];
+      basis = [`your tariff${signup !== null ? ' since ' + fmtDate(signup) : ''}: ${curProd}`];
+    } else if (K === 'SILVER') {
+      vers = TRACKER;
+      basis = saleBasis(TRACKER.filter(([, f, t]) => (!f || Date.parse(f) < c1) && (!t || Date.parse(t) > c0)));
+    }
     else {
       const now = latest((await imports()).filter((p) => keyOf(p.code) === K));
       if (!now) return fail('not on sale any more');
@@ -166,30 +170,34 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
         while (p > c0) p = addMonths(p, -term);
         while (addMonths(p, term) <= c0) p = addMonths(p, term);
         vers = [];
-        basis = [`taken on ${fmtDate(signup)} (your current agreement's start) and renewed every ${term} months:`];
-        for (; p < c1; p = addMonths(p, term)) {
+        basis = [];
+        // The sign-up date assumed for the first term, and why: your agreement's start, or a whole number of terms before it.
+        const when = (t) => (t === signup ? `${fmtDate(t)} (your current agreement's start)` : fmtDate(t));
+        for (let first = true; p < c1; p = addMonths(p, term), first = false) {
           const prod = latest((await imports(p)).filter((x) => keyOf(x.code) === K && !x.is_variable));
           // No such fix was on sale when this term would have begun: the line would be incomplete, so leave it out.
-          if (!prod) return fail(`no ${K} fix was on sale on ${fmtDate(p)}, when a term would have begun`);
+          if (!prod) return fail(`no ${K} fix was on sale on ${when(p)}, when a term would have begun`);
           vers.push([prod.code, iso(p), iso(addMonths(p, term))]);
-          basis.push(`from ${fmtDate(p)}: ${prod.code}, on sale since ${fmtDate(prod.available_from)}`);
+          basis.push(`${first ? 'signed up' : 'renewed'} ${when(p)}: ${prod.code}, on sale since ${fmtDate(prod.available_from)}`);
         }
       } else if (!now.is_variable) {
         vers = [[now.code, null, null]]; fixed = true;
         basis = [`${now.code}, on sale since ${fmtDate(now.available_from)}: its current prices over the whole period (sign-up date unknown)`];
       } else {
         vers = [];
+        const sale = [];
         let t = c0 - 864e5;
         for (let i = 0; i < 24 && t < c1; i++) {
           const p = latest((await imports(t)).filter((x) => keyOf(x.code) === K || x.display_name === now.display_name));
           if (!p) { const nf = Date.parse(now.available_from); if (nf > t) { t = nf; continue; } break; }
           const pt = p.available_to ? Date.parse(p.available_to) : null;
           vers.push([p.code, new Date(t).toISOString(), pt ? p.available_to : null]);
+          sale.push([p.code, p.available_from, p.available_to]);
           if (!pt || pt <= t) break;
           t = pt;
         }
         if (!vers.length) return fail('no version on sale over this period');
-        basis = versionBasis(vers);
+        basis = saleBasis(sale);
       }
     }
     const kind = fuel === 'gas' ? 'gas-tariffs' : 'electricity-tariffs', pfx = fuel === 'gas' ? 'G-1R-' : 'E-1R-';

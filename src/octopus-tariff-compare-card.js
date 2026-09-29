@@ -186,8 +186,8 @@ class OctopusTariffCompareCard extends HTMLElement {
         const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K, signup[f])));
         // One line per fuel (what it was priced from, or why it could not be), merged into a single unlabelled line when all fuels
         // have the same one.
-        const texts = parts.map((p) => (p.cum ? p.basis.join('\n    ') : 'cannot be priced: ' + p.why));
-        const tip = texts.every((x) => x === texts[0]) ? [cap(texts[0])] : texts.map((x, i) => `${cap(fuels[i])}: ${x}`);
+        const texts = parts.map((p) => (p.cum ? p.basis.map(cap).join('\n') : cap(p.why)));
+        const tip = texts.every((x) => x === texts[0]) ? [texts[0]] : texts.map((x, i) => `${cap(fuels[i])}: ${x.replace(/\n/g, '\n    ')}`);
         return {cum: parts.every((p) => p.cum) ? parts.map((p) => p.cum).reduce(merge) : null, tip};
       };
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;

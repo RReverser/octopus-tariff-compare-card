@@ -184,10 +184,11 @@ class OctopusTariffCompareCard extends HTMLElement {
       // from, and the first reason a fuel could not be priced.
       const total = async (K) => {
         const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K, signup[f])));
-        const tip = parts.map((p, i) => `${cap(fuels[i])}: ${p.cum ? p.basis.join('\n    ') : 'cannot be priced: ' + p.why}`);
-        const bad = parts.findIndex((p) => !p.cum);
-        return {cum: bad < 0 ? parts.map((p) => p.cum).reduce(merge) : null, tip,
-          why: bad < 0 ? null : (fuels.length > 1 ? cap(fuels[bad]) + ' ' : '') + parts[bad].why};
+        // One line per fuel (what it was priced from, or why it could not be), merged into a single unlabelled line when all fuels
+        // have the same one.
+        const texts = parts.map((p) => (p.cum ? p.basis.join('\n    ') : 'cannot be priced: ' + p.why));
+        const tip = texts.every((x) => x === texts[0]) ? [cap(texts[0])] : texts.map((x, i) => `${cap(fuels[i])}: ${x}`);
+        return {cum: parts.every((p) => p.cum) ? parts.map((p) => p.cum).reduce(merge) : null, tip};
       };
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;
       const nameOf = (k) => `${(fams.find((f) => f.key === k) || {}).name || k} (${k})`;
@@ -213,8 +214,8 @@ class OctopusTariffCompareCard extends HTMLElement {
         if (l.na) return Promise.resolve(l.cum = null);
         return total(l.key).then((r) => {
           l.cum = r.cum;
+          if (!r.cum) l.na = 'Cannot be priced';
           l.tip = [l.head, ...r.tip].join('\n');
-          if (!r.cum) l.na = 'Cannot be priced: ' + r.why;
           return r.cum;
         });
       });

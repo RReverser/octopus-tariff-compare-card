@@ -14,5 +14,5 @@ export default {
     format: 'es',
     paths: dev ? {apexcharts: APEX_CDN} : undefined,
   },
-  plugins: [nodeResolve({browser: true}), terser({format: {comments: false}})],
+  plugins: [nodeResolve({browser: true}), terser({format: {comments: false, ascii_only: true}})],
 };

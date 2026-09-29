@@ -121,6 +121,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       /* The first legend entry is your current tariff: dashed, like its line, and always shown. */
       .main .apexcharts-legend-series[rel="1"] .apexcharts-legend-text { text-decoration: underline dashed; text-decoration-thickness: 2px; text-underline-offset: 3px; }
       .main .apexcharts-legend-series[rel="1"] { cursor: default; }
+      .main .apexcharts-legend-text { font-variant-numeric: tabular-nums; }
       .apexcharts-tooltip { color: #000; }
     </style><ha-card>
       <div class="head"><div class="title">${esc(this._config.title || 'Octopus tariff comparison')}</div>
@@ -292,7 +293,12 @@ class OctopusTariffCompareCard extends HTMLElement {
       markers: {size: 0}, dataLabels: {enabled: false}, grid: {borderColor: th.grid},
       legend: {position: 'top', fontSize: '14px', itemMargin: {horizontal: 10, vertical: 4}, onItemClick: {toggleDataSeries: false},
         // Plain text only: apexcharts ignores clicks whose target is an element inside the legend text.
-        formatter: (name, o) => { const t = this._viewLines[o.seriesIndex]?.total; return `${name}  ${t == null ? '…' : '£' + t.toFixed(2)}`; }},
+        // Tariffs still loading keep the width of the current tariff's price (figure space = one digit, punctuation space = '.'),
+        // so the legend does not reflow when their prices arrive.
+        formatter: (name, o) => {
+          const t = this._viewLines[o.seriesIndex]?.total, ref = '£' + (this._viewLines[0]?.total ?? 0).toFixed(2);
+          return `${name}  ${t == null ? ref.replace(/\d/g, '\u2007').replace('.', '\u2008') : '£' + t.toFixed(2)}`;
+        }},
       xaxis: {type: 'datetime', min: a, max: b, labels: {datetimeUTC: false}},
       yaxis: {min: () => -this._yRange(), max: () => this._yRange(), tickAmount: 6, labels: {formatter: (v) => v.toFixed(2)},
         title: {text: '£ vs current tariff (+ = dearer)'}},

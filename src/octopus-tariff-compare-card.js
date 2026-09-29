@@ -120,10 +120,14 @@ class OctopusTariffCompareCard extends HTMLElement {
       .brush { min-height: ${this._config.brush_height}px; }
       /* The first legend entry is your current tariff: dashed, like its line, and always shown. */
       .main .apexcharts-legend-series[rel="1"] .apexcharts-legend-text { text-decoration: underline dashed; text-decoration-thickness: 2px; text-underline-offset: 3px; }
-      .main .apexcharts-legend-series[rel="1"] { cursor: default; }
       .main .apexcharts-legend-text { font-variant-numeric: tabular-nums; }
-      .main .apexcharts-legend-series.na { cursor: default; }
-      .main .apexcharts-legend-series.na .apexcharts-legend-text { text-decoration: line-through; }
+      /* Cursors: clickable entries a pointer, your current tariff (always shown) the default arrow, unavailable ones not-allowed. */
+      .main .apexcharts-legend-series, .main .apexcharts-legend-series * { cursor: pointer; }
+      .main .apexcharts-legend-series[rel="1"], .main .apexcharts-legend-series[rel="1"] * { cursor: default; }
+      .main .apexcharts-legend-series.na, .main .apexcharts-legend-series.na * { cursor: not-allowed; }
+      .main .apexcharts-legend-series .price { display: inline-grid; justify-items: start; }
+      .main .apexcharts-legend-series .price > * { grid-area: 1 / 1; }
+      .main .apexcharts-legend-series .price > .blank { visibility: hidden; }
       .apexcharts-tooltip { color: #000; }
     </style><ha-card>
       <div class="head"><div class="title">${esc(this._config.title || 'Octopus tariff comparison')}</div>
@@ -175,28 +179,45 @@ class OctopusTariffCompareCard extends HTMLElement {
       // Fixes are priced as if taken when the current agreement for that fuel began.
       const signup = Object.fromEntries(fuels.map((f) => { const x = hass.states[ents[f].rate]?.attributes || {}; return [f, starts[x.tariff || x.tariff_code] ?? null]; }));
       const cache = newCache();
+      const cap = (f) => f[0].toUpperCase() + f.slice(1);
+      // Both fuels' costs of tariff K, summed (null if either is missing), with the legend tooltip lines saying what each was priced
+      // from, and the first reason a fuel could not be priced.
       const total = async (K) => {
         const parts = await Promise.all(fuels.map((f) => fuelCost(cache, hass, a0, b0, f, ents[f], K, signup[f])));
-        return parts.some((p) => !p) ? null : parts.reduce(merge);
+        const tip = parts.map((p, i) => `${cap(fuels[i])}: ${p.cum ? p.basis.join('\n    ') : 'cannot be priced: ' + p.why}`);
+        const bad = parts.findIndex((p) => !p.cum);
+        return {cum: bad < 0 ? parts.map((p) => p.cum).reduce(merge) : null, tip,
+          why: bad < 0 ? null : (fuels.length > 1 ? cap(fuels[bad]) + ' ' : '') + parts[bad].why};
       };
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;
+      const nameOf = (k) => `${(fams.find((f) => f.key === k) || {}).name || k} (${k})`;
       const colour = (k) => COLORS[k] || EXTRA[Math.max(0, fams.findIndex((f) => f.key === k)) % EXTRA.length];
       const same = fuels.every((f) => cur[f] === cur[fuels[0]]);
-      const lines = [{key: 'CURRENT', label: same ? labelOf(cur[fuels[0]]) : fuels.map((f) => `${labelOf(cur[f])} ${f}`).join(' + '), colour: colour(cur[fuels[0]])}];
+      const lines = [{key: 'CURRENT', label: same ? labelOf(cur[fuels[0]]) : fuels.map((f) => `${labelOf(cur[f])} ${f}`).join(' + '), colour: colour(cur[fuels[0]]),
+        head: same ? nameOf(cur[fuels[0]]) : fuels.map((f) => `${cap(f)}: ${nameOf(cur[f])}`).join('\n')}];
       // Every tariff offered for any of the user's fuels is listed, whichever fuels are selected, so the legend keeps the same entries
       // when fuels are switched. One that does not supply all the selected fuels is marked unavailable (na) and not costed.
       const avail = FUELS.filter((f) => ents[f]).map((f) => f[0]);
       for (const f of fams) {
         if (!avail.some((c) => f.fuels.includes(c)) || (same && f.key === cur[fuels[0]])) continue;
         const na = fuels.every((fu) => f.fuels.includes(fu[0])) ? null : `Not offered for ${fuels.filter((fu) => !f.fuels.includes(fu[0])).join(' and ')}`;
-        lines.push({key: f.key, label: f.label, colour: colour(f.key), na});
+        lines.push({key: f.key, label: f.label, colour: colour(f.key), na, head: nameOf(f.key)});
       }
       // Every tariff is costed in parallel. On a first load or a fuel change, the chart appears as soon as the current tariff (the
       // baseline every line is drawn against) is ready, and each other line joins as soon as its own prices are in; the legend
       // lists the rest as pending. A periodic refresh keeps showing the previous figures and swaps them in once all are done.
       const progressive = this._data?.mode !== mode;
-      const pending = lines.map((l) => (l.na ? Promise.resolve(l.cum = null)
-        : total(l.key).then((cum) => { l.cum = cum; if (!cum) l.na = 'No published prices for your usage'; return cum; })));
+      // Legend tooltip: the full product name and code, then what it was priced from (or why it could not be).
+      const pending = lines.map((l) => {
+        l.tip = l.na ? `${l.head}\n${l.na}` : l.head;
+        if (l.na) return Promise.resolve(l.cum = null);
+        return total(l.key).then((r) => {
+          l.cum = r.cum;
+          l.tip = [l.head, ...r.tip].join('\n');
+          if (!r.cum) l.na = 'Cannot be priced: ' + r.why;
+          return r.cum;
+        });
+      });
       const base = await pending[0];
       if (token !== this._token) return;
       if (!base) throw new Error('no consumption statistics found for your meter');
@@ -278,13 +299,25 @@ class OctopusTariffCompareCard extends HTMLElement {
     this._markLegend();
   }
 
-  // Unavailable tariffs: struck through (apexcharts already greys them as hidden series), with the reason on hover. The legend is
-  // rebuilt on every chart update, so this is reapplied each time.
+  // Every entry gets its tooltip (full name, code, what it was priced from). Unavailable tariffs also get "N/A" in place of the price
+  // (apexcharts already greys them as hidden series), with the reason in the tooltip. "N/A" is laid over the blank price placeholder, so the entry keeps its width. Clicks on elements inside the legend text are
+  // ignored by apexcharts, which is fine here as these entries are not clickable anyway. The legend is rebuilt on every chart
+  // update, so this is reapplied each time.
   _markLegend() {
     this.shadowRoot?.querySelectorAll('.main .apexcharts-legend-series').forEach((el) => {
       const l = this._viewLines?.[+el.getAttribute('rel') - 1];
       el.classList.toggle('na', !!l?.na);
-      if (l?.na) el.title = l.na; else el.removeAttribute('title');
+      if (l?.tip) el.title = l.tip; else el.removeAttribute('title');
+      if (!l?.na) return;
+      const text = el.querySelector('.apexcharts-legend-text'), head = l.label + '  ';
+      if (!text || text.querySelector('.price') || !text.textContent.startsWith(head)) return;
+      const price = document.createElement('span'), blank = document.createElement('span'), na = document.createElement('span');
+      price.className = 'price';
+      blank.className = 'blank';
+      blank.textContent = text.textContent.slice(head.length);
+      na.textContent = 'N/A';
+      price.append(blank, na);
+      text.replaceChildren(head, price);
     });
   }
 

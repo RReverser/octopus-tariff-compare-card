@@ -31,7 +31,7 @@ const latest = (arr) => arr.sort((x, y) => Date.parse(y.available_from) - Date.p
 const shortName = (dn) => dn.replace(/\bOctopus\b/g, '').replace(/\bImport\b/g, '').replace(/\s+/g, ' ').trim() || dn;
 
 // Tariffs on sale in a region (single-register, any payment option, not free), plus Tracker:
-// [{key, label, fuels: 'e' | 'g' | 'eg'}], sorted by label.
+// [{key, label, name (full display name), fuels: 'e' | 'g' | 'eg'}], sorted by label.
 const famCache = {};
 export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => {
   const newest = new Map();
@@ -48,7 +48,7 @@ export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => 
     // products such as Go 12M Fixed report null for these summary fields, so only an explicit 0 and 0 excludes.
     const has = (t) => Object.values(t?.['_' + reg] || {}).some((x) => !(x.standard_unit_rate_inc_vat === 0 && x.standing_charge_inc_vat === 0));
     const e = has(d.single_register_electricity_tariffs), g = has(d.single_register_gas_tariffs);
-    return {key: keyOf(code), label: shortName(d.display_name || code), fuels: (e ? 'e' : '') + (g ? 'g' : '')};
+    return {key: keyOf(code), label: shortName(d.display_name || code), name: d.display_name || code, fuels: (e ? 'e' : '') + (g ? 'g' : '')};
   }));
   const fl = fams.filter((f) => f.fuels), seen = {};
   for (const f of fl) seen[f.label] = (seen[f.label] || 0) + 1;
@@ -130,9 +130,12 @@ export const fixedPrices = (list, a, b) => {
 };
 
 const addMonths = (t, n) => { const d = new Date(t); d.setMonth(d.getMonth() + n); return d.getTime(); };
+// Local calendar date, e.g. "27 May 2026".
+export const fmtDate = (t) => new Date(t).toLocaleDateString(undefined, {day: 'numeric', month: 'short', year: 'numeric'});
 
-// Cumulative cost (GBP) of one fuel on tariff K over [a0, b0): [[t, total], ...] on that fuel's consumption timestamps, or null when
-// K has no prices for this fuel in the region. Unit rates x usage, plus the daily standing charge accrued smoothly (per reading, in
+// Cost of one fuel on tariff K over [a0, b0): {cum, basis, why}. cum: cumulative cost (GBP) as [[t, total], ...] on that fuel's
+// consumption timestamps, or null when it cannot be worked out (why: the reason). basis: lines saying which products and dates the
+// prices were taken from. Unit rates x usage, plus the daily standing charge accrued smoothly (per reading, in
 // proportion to its length); inc VAT, direct debit. K = 'CURRENT' (or the current tariff's key): the current tariff's own published
 // rates. Other variable tariffs: the product versions on sale over the window, each with its published rates. Fixed tariffs, when
 // signup (ms) is known: signed up then and renewed every term, each term on the fix that was on sale when it began, with that
@@ -144,14 +147,18 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
     const tariff = attrs.tariff || attrs.tariff_code || '';
     const reg = tariff.slice(-1), curProd = tariff.split('-').slice(2, -1).join('-');
     const cons = await consumption(cache, hass, total, a0, b0);
-    if (!cons.length) return null;
+    const fail = (why) => ({cum: null, basis: [], why});
+    if (!cons.length) return fail('no consumption statistics');
     const c0 = cons[0][0], c1 = cons[cons.length - 1][1];
-    let vers, fixed = false;
-    if (K === 'CURRENT' || K === keyOf(curProd)) vers = [[curProd, null, null]];
-    else if (K === 'SILVER') vers = TRACKER;
+    // Versions of the product used over the window, each from a date (clipped to the window) as "CODE from DATE".
+    const versionBasis = (vs) => vs.filter(([, f, t]) => (!f || Date.parse(f) < c1) && (!t || Date.parse(t) > c0))
+      .map(([code, f]) => `${code} from ${fmtDate(Math.max(c0, f ? Date.parse(f) : c0))}`);
+    let vers, fixed = false, basis;
+    if (K === 'CURRENT' || K === keyOf(curProd)) { vers = [[curProd, null, null]]; basis = [`your tariff, ${tariff}`]; }
+    else if (K === 'SILVER') { vers = TRACKER; basis = versionBasis(TRACKER); }
     else {
       const now = latest((await imports()).filter((p) => keyOf(p.code) === K));
-      if (!now) return null;
+      if (!now) return fail('not on sale any more');
       if (!now.is_variable && signup !== null) {
         // Renewal terms around the sign-up date, covering the consumption window.
         const term = now.term || 12;
@@ -159,15 +166,18 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
         while (p > c0) p = addMonths(p, -term);
         while (addMonths(p, term) <= c0) p = addMonths(p, term);
         vers = [];
+        basis = [`taken on ${fmtDate(signup)} (your current agreement's start) and renewed every ${term} months:`];
         for (; p < c1; p = addMonths(p, term)) {
           const prod = latest((await imports(p)).filter((x) => keyOf(x.code) === K && !x.is_variable));
-          if (!prod) {  // no such fix was on sale when this term would have begun: the line would be incomplete, so leave it out
-            console.warn(`octopus-tariff-compare-card: no ${K} fix was on sale on ${iso(p)}`);
-            return null;
-          }
+          // No such fix was on sale when this term would have begun: the line would be incomplete, so leave it out.
+          if (!prod) return fail(`no ${K} fix was on sale on ${fmtDate(p)}, when a term would have begun`);
           vers.push([prod.code, iso(p), iso(addMonths(p, term))]);
+          basis.push(`from ${fmtDate(p)}: ${prod.code}, on sale since ${fmtDate(prod.available_from)}`);
         }
-      } else if (!now.is_variable) { vers = [[now.code, null, null]]; fixed = true; } else {
+      } else if (!now.is_variable) {
+        vers = [[now.code, null, null]]; fixed = true;
+        basis = [`${now.code}, on sale since ${fmtDate(now.available_from)}: its current prices over the whole period (sign-up date unknown)`];
+      } else {
         vers = [];
         let t = c0 - 864e5;
         for (let i = 0; i < 24 && t < c1; i++) {
@@ -178,7 +188,8 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
           if (!pt || pt <= t) break;
           t = pt;
         }
-        if (!vers.length) return null;
+        if (!vers.length) return fail('no version on sale over this period');
+        basis = versionBasis(vers);
       }
     }
     const kind = fuel === 'gas' ? 'gas-tariffs' : 'electricity-tariffs', pfx = fuel === 'gas' ? 'G-1R-' : 'E-1R-';
@@ -207,7 +218,7 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
         }
       }
     }
-    if (!units.length) return null;
+    if (!units.length) return fail('no published prices for this period');
     units.sort((x, y) => x[0] - y[0]); stand.sort((x, y) => x[0] - y[0]);
     const out = [[c0, 0]];
     let pence = 0, missing = false;
@@ -218,8 +229,11 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
       for (let i = 0; i < n; i++) { const r = at(units, s + (i + 0.5) * (e - s) / n); if (r === null) missing = true; else pence += r * kwh / n; }
       out.push([e, pence / 100]);
     }
-    if (missing) console.warn(`octopus-tariff-compare-card: ${fuel} ${K} has gaps in published prices for this window`);
-    return out;
+    if (missing) {
+      console.warn(`octopus-tariff-compare-card: ${fuel} ${K} has gaps in published prices for this window`);
+      basis.push('some prices are missing for this period and are left out');
+    }
+    return {cum: out, basis, why: null};
   })());
 };
 

@@ -122,6 +122,8 @@ class OctopusTariffCompareCard extends HTMLElement {
       .main .apexcharts-legend-series[rel="1"] .apexcharts-legend-text { text-decoration: underline dashed; text-decoration-thickness: 2px; text-underline-offset: 3px; }
       .main .apexcharts-legend-series[rel="1"] { cursor: default; }
       .main .apexcharts-legend-text { font-variant-numeric: tabular-nums; }
+      .main .apexcharts-legend-series.na { cursor: default; }
+      .main .apexcharts-legend-series.na .apexcharts-legend-text { text-decoration: line-through; }
       .apexcharts-tooltip { color: #000; }
     </style><ha-card>
       <div class="head"><div class="title">${esc(this._config.title || 'Octopus tariff comparison')}</div>
@@ -181,20 +183,26 @@ class OctopusTariffCompareCard extends HTMLElement {
       const colour = (k) => COLORS[k] || EXTRA[Math.max(0, fams.findIndex((f) => f.key === k)) % EXTRA.length];
       const same = fuels.every((f) => cur[f] === cur[fuels[0]]);
       const lines = [{key: 'CURRENT', label: same ? labelOf(cur[fuels[0]]) : fuels.map((f) => `${labelOf(cur[f])} ${f}`).join(' + '), colour: colour(cur[fuels[0]])}];
+      // Every tariff offered for any of the user's fuels is listed, whichever fuels are selected, so the legend keeps the same entries
+      // when fuels are switched. One that does not supply all the selected fuels is marked unavailable (na) and not costed.
+      const avail = FUELS.filter((f) => ents[f]).map((f) => f[0]);
       for (const f of fams) {
-        if (fuels.every((fu) => f.fuels.includes(fu[0])) && !(same && f.key === cur[fuels[0]])) lines.push({key: f.key, label: f.label, colour: colour(f.key)});
+        if (!avail.some((c) => f.fuels.includes(c)) || (same && f.key === cur[fuels[0]])) continue;
+        const na = fuels.every((fu) => f.fuels.includes(fu[0])) ? null : `Not offered for ${fuels.filter((fu) => !f.fuels.includes(fu[0])).join(' and ')}`;
+        lines.push({key: f.key, label: f.label, colour: colour(f.key), na});
       }
       // Every tariff is costed in parallel. On a first load or a fuel change, the chart appears as soon as the current tariff (the
       // baseline every line is drawn against) is ready, and each other line joins as soon as its own prices are in; the legend
       // lists the rest as pending. A periodic refresh keeps showing the previous figures and swaps them in once all are done.
       const progressive = this._data?.mode !== mode;
-      const pending = lines.map((l) => total(l.key).then((cum) => { l.cum = cum; return cum; }));
+      const pending = lines.map((l) => (l.na ? Promise.resolve(l.cum = null)
+        : total(l.key).then((cum) => { l.cum = cum; if (!cum) l.na = 'No published prices for your usage'; return cum; })));
       const base = await pending[0];
       if (token !== this._token) return;
       if (!base) throw new Error('no consumption statistics found for your meter');
       const show = () => {
         if (token !== this._token) return;
-        this._data = {mode, start: base[0][0], end: base[base.length - 1][0], lines: lines.filter((l) => l.cum !== null)};
+        this._data = {mode, start: base[0][0], end: base[base.length - 1][0], lines};
         this._status('');
         this._redraw();
       };
@@ -264,8 +272,19 @@ class OctopusTariffCompareCard extends HTMLElement {
     const vis = this._visibleKeys(this._data.mode), w = this._main?.w;
     if (!w) return;
     this._viewLines.forEach((l, i) => {
-      const hidden = w.globals.collapsedSeriesIndices.includes(i), want = i === 0 || vis.has(l.key);
+      const hidden = w.globals.collapsedSeriesIndices.includes(i), want = i === 0 || (vis.has(l.key) && !l.na);
       if (want === hidden) this._main.toggleSeries(l.label);
+    });
+    this._markLegend();
+  }
+
+  // Unavailable tariffs: struck through (apexcharts already greys them as hidden series), with the reason on hover. The legend is
+  // rebuilt on every chart update, so this is reapplied each time.
+  _markLegend() {
+    this.shadowRoot?.querySelectorAll('.main .apexcharts-legend-series').forEach((el) => {
+      const l = this._viewLines?.[+el.getAttribute('rel') - 1];
+      el.classList.toggle('na', !!l?.na);
+      if (l?.na) el.title = l.na; else el.removeAttribute('title');
     });
   }
 
@@ -386,12 +405,13 @@ class OctopusTariffCompareCard extends HTMLElement {
 
   _legendClick(i) {
     const d = this._data;
-    if (!d || i <= 0 || i >= this._viewLines.length) return;  // the current tariff always stays visible
+    if (!d || i <= 0 || i >= this._viewLines.length || this._viewLines[i].na) return;  // current tariff: always shown; unavailable: never
     const l = this._viewLines[i], vis = this._visibleKeys(d.mode);
     vis.has(l.key) ? vis.delete(l.key) : vis.add(l.key);
     this._state.visible = {...(this._state.visible || {}), [d.mode]: [...vis]};
     this._save();
     this._main.toggleSeries(l.label);
+    this._markLegend();
   }
 }
 

@@ -5,7 +5,7 @@ A Home Assistant card that prices your own metered usage on every Octopus Energy
 - **Main chart:** running cost difference against your current tariff (dashed line). Above zero means that tariff would have cost more.
 - **Legend:** the total cost of the selected period on each tariff. Click an entry to show or hide that tariff; your current tariff always stays shown.
 - **Lower chart:** your daily cost on the current tariff. Drag or resize the selection to pick the period.
-- **Electricity / Gas buttons:** compare either fuel, or both together (sum). With both selected, only tariffs that supply both fuels are listed.
+- **Electricity / Gas buttons:** compare either fuel, or both together (sum). The legend keeps the same tariffs for every choice: a tariff that does not supply the selected fuel, or has no published prices for your usage period, is struck through (hover it for the reason) and cannot be shown.
 
 The period, fuel selection and shown tariffs are remembered per browser.
 

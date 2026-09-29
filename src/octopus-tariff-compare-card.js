@@ -191,8 +191,7 @@ class OctopusTariffCompareCard extends HTMLElement {
         return {cum: parts.every((p) => p.cum) ? parts.map((p) => p.cum).reduce(merge) : null, tip};
       };
       const labelOf = (k) => (fams.find((f) => f.key === k) || {}).label || k;
-      // Full product name; with its product key only where the tooltip has no "Code:" line to identify it.
-      const nameOf = (k, withKey = false) => `${(fams.find((f) => f.key === k) || {}).name || k}${withKey ? ` (${k})` : ''}`;
+      const nameOf = (k) => (fams.find((f) => f.key === k) || {}).name || k;
       const colour = (k) => COLORS[k] || EXTRA[Math.max(0, fams.findIndex((f) => f.key === k)) % EXTRA.length];
       const same = fuels.every((f) => cur[f] === cur[fuels[0]]);
       const lines = [{key: 'CURRENT', label: same ? labelOf(cur[fuels[0]]) : fuels.map((f) => `${labelOf(cur[f])} ${f}`).join(' + '), colour: colour(cur[fuels[0]]),
@@ -203,7 +202,7 @@ class OctopusTariffCompareCard extends HTMLElement {
       for (const f of fams) {
         if (!avail.some((c) => f.fuels.includes(c)) || (same && f.key === cur[fuels[0]])) continue;
         const na = fuels.every((fu) => f.fuels.includes(fu[0])) ? null : `Not offered for ${fuels.filter((fu) => !f.fuels.includes(fu[0])).join(' and ')}`;
-        lines.push({key: f.key, label: f.label, colour: colour(f.key), na, head: nameOf(f.key), headKey: nameOf(f.key, true)});
+        lines.push({key: f.key, label: f.label, colour: colour(f.key), na, head: nameOf(f.key)});
       }
       // Every tariff is costed in parallel. On a first load or a fuel change, the chart appears as soon as the current tariff (the
       // baseline every line is drawn against) is ready, and each other line joins as soon as its own prices are in; the legend
@@ -211,12 +210,13 @@ class OctopusTariffCompareCard extends HTMLElement {
       const progressive = this._data?.mode !== mode;
       // Legend tooltip: the full product name and code, then what it was priced from (or why it could not be).
       const pending = lines.map((l) => {
-        l.tip = l.na ? `${l.headKey}\n${l.na}` : l.head;
+        // Unavailable: the reason, then the product key in place of a version's code.
+        l.tip = l.na ? `${l.head}\n${l.na}\nCode: ${l.key}` : l.head;
         if (l.na) return Promise.resolve(l.cum = null);
         return total(l.key).then((r) => {
           l.cum = r.cum;
           if (!r.cum) l.na = 'Cannot be priced';
-          l.tip = [r.cum ? l.head : l.headKey || l.head, ...r.tip].join('\n');
+          l.tip = [l.head, ...r.tip, ...(r.cum ? [] : [`Code: ${l.key}`])].join('\n');
           return r.cum;
         });
       });

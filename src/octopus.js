@@ -178,7 +178,7 @@ export const fuelCost = (cache, hass, a0, b0, fuel, {rate, consumption: total}, 
         for (let first = true; p < c1; p = addMonths(p, term), first = false) {
           const prod = latest((await imports(p)).filter((x) => keyOf(x.code) === K && !x.is_variable));
           // No such fix was on sale when this term would have begun: the line would be incomplete, so leave it out.
-          if (!prod) return fail(`Not on sale on the presumed ${first ? 'sign-up' : 'renewal'} date, ${when(p)}`);
+          if (!prod) return fail(`Wasn't on sale on ${fmtDate(p)} (${p === signup ? "your current agreement's start" : 'presumed ' + (first ? 'sign-up' : 'renewal')})`);
           vers.push([prod.code, iso(p), iso(addMonths(p, term))]);
           basis.push(`Presumed ${first ? 'sign-up' : 'renewal'}: ${when(p)}\n${onSale(prod.available_from)}\nCode: ${prod.code}`);
         }

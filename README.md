@@ -64,6 +64,7 @@ Everything is optional:
 - The standing charge is spread evenly over time.
 - Prices are requested per calendar month, and only when needed: your current tariff for the whole history (for the lower chart), every other tariff only for the months the selected period covers. Moving the selection to months not seen yet loads them when you let go of it; each line appears once its prices are in.
 - Months that have ended are cached by the browser beyond the API's 5-minute limit, so they are not downloaded again on later visits. The current month is priced again on every refresh (every 15 minutes).
+- The list of tariffs on offer in your region is kept in the browser for a day. After that the stored list is still shown at once while a fresh one is fetched in the background, and the card updates if it changed.
 - The results are estimates from published prices and your recorded usage; your bills may differ, for example from meter reading timing or rounding.
 
 ## Known limitations

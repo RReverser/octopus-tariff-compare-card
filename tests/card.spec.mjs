@@ -113,6 +113,47 @@ test.describe('short history (10 days)', () => {
   });
 });
 
+test.describe('tariff list cache', () => {
+  const KEY = 'octopus-tariff-compare-card:families:H';
+  // Requests for a product's own record (/v1/products/<code>/), made only when the tariff list is built.
+  const details = (api) => api.filter((u) => /^\/v1\/products\/[^/]+\/$/.test(new URL(u).pathname));
+  const keys = async (page) => (await lines(page)).lines.map((l) => l.key);
+
+  test('a reload within a day uses the stored list and requests no product records', async ({page}) => {
+    const {api} = await open(page, 'short');
+    expect(details(api).length).toBeGreaterThan(0);
+    const before = await keys(page), n = api.length;
+    await page.reload();
+    await settled(page);
+    expect(details(api.slice(n))).toEqual([]);
+    expect(await keys(page)).toEqual(before);
+  });
+
+  test('a day-old list is shown at once, refreshed in the background, and changes are applied', async ({page}) => {
+    const {api} = await open(page, 'short');
+    const full = await keys(page);
+    // Pretend the stored list is over a day old and lacks Agile.
+    await page.evaluate(([k, t]) => {
+      const c = JSON.parse(localStorage.getItem(k));
+      localStorage.setItem(k, JSON.stringify({t, fams: c.fams.filter((f) => f.key !== 'AGILE')}));
+    }, [KEY, NOW - 25 * 36e5]);
+    const n = api.length;
+    // Hold the background refresh back (one product record is enough: the list is replaced only once all have arrived) to see
+    // what the card shows meanwhile.
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    await page.route(/\/v1\/products\/AGILE[^/]*\/$/, async (route) => { await gate; return route.fallback(); });
+    await page.reload();
+    await settled(page);
+    expect(await keys(page)).toEqual(full.filter((k) => k !== 'AGILE'));
+    release();
+    await expect.poll(() => keys(page)).toEqual(full);
+    await settled(page);
+    expect(details(api.slice(n)).length).toBeGreaterThan(0);
+    expect(await page.evaluate((k) => JSON.parse(localStorage.getItem(k)).t, KEY)).toBe(NOW);
+  });
+});
+
 test.describe('not an admin (agreement start unknown)', () => {
   test('fixes are priced at the latest fix\'s prices throughout, and say so', async ({page}) => {
     await open(page, 'nonadmin');

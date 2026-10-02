@@ -6,7 +6,7 @@
 // are costed only for the months the selected period covers: moving the brush to months not seen yet loads them, and each line
 // appears once its months are in.
 import ApexCharts from 'apexcharts';
-import {FUELS, curKey, families, consumption, months, priceMonth, merge, thin, detectEntities} from './octopus.js';
+import {FUELS, curKey, families, onFamiliesChanged, consumption, months, priceMonth, merge, thin, detectEntities} from './octopus.js';
 import {agreementStarts} from './agreements.js';
 
 const VERSION = '0.1.0';
@@ -53,12 +53,17 @@ class OctopusTariffCompareCard extends HTMLElement {
 
   connectedCallback() {
     clearInterval(this._timer);
+    this._unsubFamilies?.();
+    // A background refresh of a day-old tariff list found changes: rebuild the lines from it.
+    this._unsubFamilies = onFamiliesChanged(() => this._refresh());
     this._timer = setInterval(() => this._refresh(), REFRESH_MS);
     if (this._hass && this._data && !this._main) this._redraw();
   }
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    this._unsubFamilies?.();
+    this._unsubFamilies = null;
     this._destroyCharts();
   }
 

@@ -31,9 +31,9 @@ const latest = (arr) => arr.sort((x, y) => Date.parse(y.available_from) - Date.p
 const shortName = (dn) => dn.replace(/\bOctopus\b/g, '').replace(/\bImport\b/g, '').replace(/\s+/g, ' ').trim() || dn;
 
 // Tariffs on sale in a region (single-register, any payment option, not free), plus Tracker:
-// [{key, label, name (full display name), fuels: 'e' | 'g' | 'eg'}], sorted by label.
-const famCache = {};
-export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => {
+// [{key, label, name (full display name), fuels: 'e' | 'g' | 'eg'}], sorted by label. Throws if any product could not be read, so
+// a transient failure is never cached as "that tariff does not exist".
+const fetchFamilies = async (reg) => {
   const newest = new Map();
   for (const p of await imports()) {
     const k = keyOf(p.code), prev = newest.get(k);
@@ -41,8 +41,7 @@ export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => 
   }
   const codes = [...[...newest.values()].map((p) => p.code), ...(newest.has('SILVER') ? [] : [TRACKER[TRACKER.length - 1][0]])];
   const fams = await Promise.all(codes.map(async (code) => {
-    let d;
-    try { d = await getJSON(API + code + '/'); } catch { return {fuels: ''}; }  // product unavailable: leave it out
+    const d = await getJSON(API + code + '/');
     // Payment keys vary by product (direct_debit_monthly, or 'varying' on Flexible): any tariff for the region counts, except free
     // ones (explicit zero unit rate and standing charge: Octopus Zero / Zero Bills, only for registered Zero homes). Time-of-use
     // products such as Go 12M Fixed report null for these summary fields, so only an explicit 0 and 0 excludes.
@@ -54,6 +53,32 @@ export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => 
   for (const f of fl) seen[f.label] = (seen[f.label] || 0) + 1;
   for (const f of fl) if (seen[f.label] > 1) f.label += ' (' + f.key + ')';
   return fl.sort((a, b) => a.label.localeCompare(b.label));
+};
+
+// The tariff list changes rarely but costs a product-list request plus one request per product, so it is kept in localStorage per
+// region. Younger than a day: used as is. Older: used straight away while a fresh copy is fetched in the background
+// (stale-while-revalidate); if that differs, listeners registered with onFamiliesChanged are called.
+const FAM_KEY = 'octopus-tariff-compare-card:families:', FAM_TTL = DAY;
+const famRead = (reg) => { try { const c = JSON.parse(localStorage.getItem(FAM_KEY + reg)); return c && Array.isArray(c.fams) ? c : null; } catch { return null; } };
+const famWrite = (reg, fams) => { try { localStorage.setItem(FAM_KEY + reg, JSON.stringify({t: Date.now(), fams})); } catch { /* storage unavailable */ } };
+const famListeners = new Set();
+export const onFamiliesChanged = (fn) => { famListeners.add(fn); return () => famListeners.delete(fn); };
+const famCache = {};
+const revalidate = (reg, old) => fetchFamilies(reg).then((fams) => {
+  famWrite(reg, fams);
+  if (JSON.stringify(fams) === JSON.stringify(old)) return;
+  famCache[reg] = Promise.resolve(fams);
+  for (const fn of famListeners) fn(reg);
+}, (e) => console.warn('octopus-tariff-compare-card: could not refresh the tariff list', e));
+export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => {
+  const c = famRead(reg);
+  if (c) {
+    if (!(Date.now() - c.t < FAM_TTL)) revalidate(reg, c.fams);
+    return c.fams;
+  }
+  const fams = await fetchFamilies(reg);
+  famWrite(reg, fams);
+  return fams;
 })().catch((e) => { delete famCache[reg]; throw e; }));
 
 const at = (arr, t) => {

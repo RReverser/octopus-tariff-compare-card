@@ -93,12 +93,17 @@ test.describe('short history (10 days)', () => {
     const {release, errors} = await open(page, 'short', {hold: (u) => u.includes('/AGILE-24-01-01/electricity-tariffs/')});
     await expect.poll(() => page.evaluate(() => !!window.card._main && window.card._view(...window.card._period()).filter((l) => l.total != null).length)).toBe(4);
     const pending = await legend(page);
-    expect(pending[3].text).toBe('Agile £');  // blank price, held back
-    expect(pending[3].title).toBe('Agile Octopus\nLoading prices…');
+    // Held back: "…" over a blank price, looking disabled, and not clickable yet.
+    expect(pending[3]).toMatchObject({loading: true, cursor: 'progress', title: 'Agile Octopus\nLoading prices…'});
+    expect(pending[3].text).toMatch(/^Agile £\s*…$/);
+    expect(pending.filter((e) => e.loading).length).toBe(1);
+    await page.locator('.main .apexcharts-legend-series').nth(3).click();
+    expect(await page.evaluate(() => window.card._state.visible)).toBeUndefined();
     release();
     await settled(page);
     const done = await legend(page);
     expect(done[3].text).toMatch(/^Agile £\d+\.\d\d$/);
+    expect(done[3]).toMatchObject({loading: false, cursor: 'pointer'});
     // Same digit count as the current tariff's price here, so the same width.
     expect(Math.abs(done[3].width - pending[3].width)).toBeLessThanOrEqual(1);
     expect(errors).toEqual([]);
@@ -113,11 +118,49 @@ test.describe('short history (10 days)', () => {
   });
 });
 
-test.describe('tariff list cache', () => {
-  const KEY = 'octopus-tariff-compare-card:families:H';
+test.describe('tariff list', () => {
+  const KEY = 'octopus-tariff-compare-card:tariffs:H';
+  const RECORD = /\/v1\/products\/[^/]+\/$/;
   // Requests for a product's own record (/v1/products/<code>/), made only when the tariff list is built.
   const details = (api) => api.filter((u) => /^\/v1\/products\/[^/]+\/$/.test(new URL(u).pathname));
   const keys = async (page) => (await lines(page)).lines.map((l) => l.key);
+
+  test('the legend is drawn from the product list before any product record arrives, its entries loading until then', async ({page}) => {
+    const {api, release, errors} = await open(page, 'short', {hold: (u) => RECORD.test(new URL(u).pathname)});
+    await expect.poll(() => page.evaluate(() => !!window.card._main && window.card.shadowRoot.querySelectorAll('.main .apexcharts-legend-series').length)).toBe(6);
+    const pending = await legend(page);
+    expect(pending.map((e) => e.text.split(' £')[0])).toEqual(['Flexible', '12M Fixed', '18M Fixed', 'Agile', 'Cosy 12M Fixed', 'Tracker']);
+    expect(pending.map((e) => e.loading)).toEqual([false, true, true, true, true, true]);
+    expect(pending.slice(1).every((e) => /£\s*…$/.test(e.text) && e.cursor === 'progress' && e.title.endsWith('\nLoading prices…'))).toBe(true);
+    // Only the current tariff has been priced so far; no other tariff's prices are requested before its record arrives.
+    expect(api.filter((u) => u.includes('-tariffs/') && !u.includes('/VAR-22-11-01/'))).toEqual([]);
+    await page.locator('.main .apexcharts-legend-series').nth(5).click();
+    expect(await page.evaluate(() => window.card._state.visible)).toBeUndefined();
+    release();
+    await settled(page);
+    const done = await legend(page);
+    expect(done.map((e) => e.text.split(' £')[0])).toEqual(pending.map((e) => e.text.split(' £')[0]));
+    expect(done.some((e) => e.loading)).toBe(false);
+    expect(done.map((e) => e.na)).toEqual([false, false, true, false, false, false]);
+    expect(errors).toEqual([]);
+  });
+
+  test('a tariff not offered in your region shows N/A, and is left out from then on', async ({page}) => {
+    await open(page, 'short');
+    // Start again from nothing stored, with Agile's record listing no tariffs for the region.
+    await page.evaluate(() => localStorage.clear());
+    await page.route(/\/v1\/products\/AGILE-24-01-01\/$/, (route) => route.fulfill({status: 200, contentType: 'application/json',
+      headers: {'access-control-allow-origin': '*'}, body: JSON.stringify({code: 'AGILE-24-01-01', display_name: 'Agile Octopus',
+        single_register_electricity_tariffs: {_A: {direct_debit_monthly: {standard_unit_rate_inc_vat: 20, standing_charge_inc_vat: 40}}},
+        single_register_gas_tariffs: {}})}));
+    await page.reload();
+    await settled(page);
+    const agile = (await lines(page)).lines.find((l) => l.key === 'AGILE');
+    expect(agile).toMatchObject({na: 'Not offered in your region', tip: 'Agile Octopus\nNot offered in your region\nCode: AGILE'});
+    await page.reload();
+    await settled(page);
+    expect((await lines(page)).lines.map((l) => l.key)).toEqual(ALL.filter((k) => k !== 'AGILE'));
+  });
 
   test('a reload within a day uses the stored list and requests no product records', async ({page}) => {
     const {api} = await open(page, 'short');
@@ -138,18 +181,19 @@ test.describe('tariff list cache', () => {
       localStorage.setItem(k, JSON.stringify({t, fams: c.fams.filter((f) => f.key !== 'AGILE')}));
     }, [KEY, NOW - 25 * 36e5]);
     const n = api.length;
-    // Hold the background refresh back (one product record is enough: the list is replaced only once all have arrived) to see
-    // what the card shows meanwhile.
+    // Hold the background refresh (the product list) back to see what the card shows meanwhile: the stored list, drawn at once.
+    // Pricing other tariffs needs the product list too, so they stay loading until it arrives.
     let release;
     const gate = new Promise((r) => { release = r; });
-    await page.route(/\/v1\/products\/AGILE[^/]*\/$/, async (route) => { await gate; return route.fallback(); });
+    const isList = (u) => new URL(u).pathname === '/v1/products/' && !new URL(u).searchParams.has('available_at');
+    await page.route((u) => isList(u.href), async (route) => { await gate; return route.fallback(); });
     await page.reload();
-    await settled(page);
+    await expect.poll(() => page.evaluate(() => !!window.card._main && !window.card._drawing)).toBe(true);
     expect(await keys(page)).toEqual(full.filter((k) => k !== 'AGILE'));
     release();
     await expect.poll(() => keys(page)).toEqual(full);
+    expect(api.slice(n).filter(isList)).toHaveLength(1);  // one request, shared with pricing
     await settled(page);
-    expect(details(api.slice(n)).length).toBeGreaterThan(0);
     expect(await page.evaluate((k) => JSON.parse(localStorage.getItem(k)).t, KEY)).toBe(NOW);
   });
 });

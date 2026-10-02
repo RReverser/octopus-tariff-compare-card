@@ -6,7 +6,7 @@
 // are costed only for the months the selected period covers: moving the brush to months not seen yet loads them, and each line
 // appears once its months are in.
 import ApexCharts from 'apexcharts';
-import {FUELS, curKey, families, onFamiliesChanged, consumption, months, priceMonth, merge, thin, detectEntities} from './octopus.js';
+import {FUELS, curKey, families, onFamiliesChanged, knownFuels, productFuels, consumption, months, priceMonth, merge, thin, detectEntities} from './octopus.js';
 import {agreementStarts} from './agreements.js';
 
 const VERSION = '0.1.0';
@@ -133,6 +133,9 @@ class OctopusTariffCompareCard extends HTMLElement {
       .main .apexcharts-legend-series, .main .apexcharts-legend-series * { cursor: pointer; }
       .main .apexcharts-legend-series[rel="1"], .main .apexcharts-legend-series[rel="1"] * { cursor: default; }
       .main .apexcharts-legend-series.na, .main .apexcharts-legend-series.na * { cursor: not-allowed; }
+      /* Tariffs whose prices are still loading look disabled (as apexcharts shows hidden ones) and cannot be clicked yet. */
+      .main .apexcharts-legend-series.loading { opacity: 0.45; }
+      .main .apexcharts-legend-series.loading, .main .apexcharts-legend-series.loading * { cursor: progress; }
       .main .apexcharts-legend-series .price { display: inline-grid; justify-items: start; }
       .main .apexcharts-legend-series .price > * { grid-area: 1 / 1; }
       .main .apexcharts-legend-series .price > .blank { visibility: hidden; }
@@ -232,15 +235,16 @@ class OctopusTariffCompareCard extends HTMLElement {
       const same = fuels.every((f) => cur[f] === cur[fuels[0]]);
       const lines = [{key: 'CURRENT', label: same ? labelOf(cur[fuels[0]]) : fuels.map((f) => `${labelOf(cur[f])} ${f}`).join(' + '), colour: colour(cur[fuels[0]]),
         head: same ? nameOf(cur[fuels[0]]) : fuels.map((f) => `${cap(f)}: ${nameOf(cur[f])}`).join('\n')}];
-      // Every tariff offered for any of the user's fuels is listed, whichever fuels are selected, so the legend keeps the same entries
-      // when fuels are switched. One that does not supply all the selected fuels is marked unavailable (na) and not costed.
-      const avail = FUELS.filter((f) => ents[f]).map((f) => f[0]);
+      // Every tariff is listed whichever fuels are selected, so the legend keeps the same entries when fuels are switched, except
+      // those already known to offer none of the user's fuels in their region. Which fuels a tariff offers is looked up when it is
+      // first shown (_view); one that does not supply all the selected fuels is then marked unavailable and not costed.
+      const avail = FUELS.filter((f) => ents[f]).map((f) => f[0]), reg = tariff(fuels[0]).slice(-1);
       for (const f of fams) {
-        if (!avail.some((c) => f.fuels.includes(c)) || (same && f.key === cur[fuels[0]])) continue;
-        const na = fuels.every((fu) => f.fuels.includes(fu[0])) ? null : `Not offered for ${fuels.filter((fu) => !f.fuels.includes(fu[0])).join(' and ')}`;
-        lines.push({key: f.key, label: f.label, colour: colour(f.key), na, head: nameOf(f.key)});
+        const known = knownFuels(reg, f.code);
+        if ((known !== undefined && !avail.some((c) => known.includes(c))) || (same && f.key === cur[fuels[0]])) continue;
+        lines.push({key: f.key, code: f.code, label: f.label, colour: colour(f.key), head: nameOf(f.key)});
       }
-      const data = {mode: fuels.join('+'), fuels, lines, ctx, byMonth, gen: (this._gen = (this._gen || 0) + 1),
+      const data = {mode: fuels.join('+'), fuels, reg, lines, ctx, byMonth, gen: (this._gen = (this._gen || 0) + 1),
         start: Math.min(...usage.map((u) => u[0][0])), end: Math.max(...usage.map((u) => u[u.length - 1][1]))};
       // The current tariff over the whole history: the baseline of every line, and the brush chart.
       const all = [];
@@ -318,15 +322,36 @@ class OctopusTariffCompareCard extends HTMLElement {
     const base = this._cost(d, d.lines[0], a, b, load);
     const bc = base.cum || [[a, 0]];
     const blank = thin(bc.map(([t]) => [t, null]), MAX_POINTS);
+    const loading = (l) => ({...l, loading: true, points: blank, total: null, tip: `${l.head}\nLoading prices…`});
     return d.lines.map((l, i) => {
-      if (l.na) return {...l, points: blank, total: null, tip: `${l.head}\n${l.na}\nCode: ${l.key}`};
+      if (i > 0) {
+        const fu = this._lineFuels(d, l, load);
+        if (l.why) return {...l, na: 'Cannot be priced', points: blank, total: null, tip: `${l.head}\n${cap(l.why)}\nCode: ${l.key}`};
+        if (fu === undefined) return loading(l);
+        const missing = d.fuels.filter((f) => !fu.includes(f[0]));
+        if (missing.length) {
+          const na = fu ? `Not offered for ${missing.join(' and ')}` : 'Not offered in your region';
+          return {...l, na, points: blank, total: null, tip: `${l.head}\n${na}\nCode: ${l.key}`};
+        }
+      }
       const r = i === 0 ? base : this._cost(d, l, a, b, load);
       if (r.why) return {...l, na: 'Cannot be priced', points: blank, total: null, tip: `${l.head}\n${cap(r.why)}\nCode: ${l.key}`};
-      if (!r.cum || !base.cum) return {...l, points: blank, total: null, tip: `${l.head}\nLoading prices…`};
+      if (!r.cum || !base.cum) return loading(l);
       const pts = bc.map(([t, v]) => [t, Math.round((r.cum[idxAt(r.cum, t)][1] - v) * 100) / 100]);
       const tip = [l.head, ...this._tipLines(d.fuels, d.fuels.map((f) => r.basis[f].map(cap).join('\n')))].join('\n');
       return {...l, points: thin(pts, MAX_POINTS), total: r.cum[r.cum.length - 1][1], tip};
     });
+  }
+
+  // Fuels a line's tariff offers in your region ('e', 'g', 'eg' or ''), or undefined until its product record has been read (load:
+  // start reading it). A failed read leaves the line unpriceable (why) until the next refresh.
+  _lineFuels(d, l, load) {
+    const k = knownFuels(d.reg, l.code);
+    if (k !== undefined || !load || l.asked) return k;
+    l.asked = true;
+    productFuels(d.reg, l.code).catch((err) => { l.why = 'could not load the product: ' + (err.message || err); })
+      .then(() => { if (d === this._data) this._dataArrived(); });
+    return undefined;
   }
 
   // Prices for more months arrived: update the main chart once for all that arrive together.
@@ -386,22 +411,24 @@ class OctopusTariffCompareCard extends HTMLElement {
   }
 
   // Every entry gets its tooltip (full name, code, what it was priced from). Unavailable tariffs also get "N/A" in place of the price
-  // (apexcharts already greys them as hidden series), with the reason in the tooltip. "N/A" is laid over the blank price placeholder, so the entry keeps its width. Clicks on elements inside the legend text are
-  // ignored by apexcharts, which is fine here as these entries are not clickable anyway. The legend is rebuilt on every chart
-  // update, so this is reapplied each time.
+  // (apexcharts already greys them as hidden series), with the reason in the tooltip; tariffs still loading look disabled too, with
+  // "…" in place of the price. "N/A" or "…" is laid over the blank price placeholder, so the entry keeps its width. Clicks on
+  // elements inside the legend text are ignored by apexcharts, which is fine here as these entries are not clickable anyway. The
+  // legend is rebuilt on every chart update, so this is reapplied each time.
   _markLegend() {
     this.shadowRoot?.querySelectorAll('.main .apexcharts-legend-series').forEach((el) => {
       const l = this._viewLines?.[+el.getAttribute('rel') - 1];
       el.classList.toggle('na', !!l?.na);
+      el.classList.toggle('loading', !!l?.loading);
       if (l?.tip) el.title = l.tip; else el.removeAttribute('title');
-      if (!l?.na) return;
+      if (!l?.na && !l?.loading) return;
       const text = el.querySelector('.apexcharts-legend-text'), head = l.label + '  ';
       if (!text || text.querySelector('.price') || !text.textContent.startsWith(head)) return;
       const price = document.createElement('span'), blank = document.createElement('span'), na = document.createElement('span');
       price.className = 'price';
       blank.className = 'blank';
       blank.textContent = text.textContent.slice(head.length);
-      na.textContent = 'N/A';
+      na.textContent = l.na ? 'N/A' : '…';
       price.append(blank, na);
       text.replaceChildren(head, price);
     });
@@ -541,7 +568,8 @@ class OctopusTariffCompareCard extends HTMLElement {
 
   _legendClick(i) {
     const d = this._data;
-    if (!d || i <= 0 || i >= this._viewLines.length || this._viewLines[i].na) return;  // current tariff: always shown; unavailable: never
+    // Current tariff: always shown. Unavailable: never. Still loading: not until its prices are in.
+    if (!d || i <= 0 || i >= this._viewLines.length || this._viewLines[i].na || this._viewLines[i].loading) return;
     const l = this._viewLines[i], vis = this._visibleKeys(d.mode);
     vis.has(l.key) ? vis.delete(l.key) : vis.add(l.key);
     this._state.visible = {...(this._state.visible || {}), [d.mode]: [...vis]};

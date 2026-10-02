@@ -23,48 +23,80 @@ export const TRACKER = [
 ];
 
 const DAY = 864e5;
+// Octopus-brand household import products on sale at time t (default: now). The API filters by brand, business and prepay (a page
+// holds them all: it has no page_size for this list, and its pages are followed anyway); there is no filter for direction, and the
+// flags are checked here too.
 const imports = async (t) => {
-  const url = API + '?brand=OCTOPUS_ENERGY&is_business=false&page_size=100' + (t === undefined ? '' : '&available_at=' + new Date(t).toISOString());
+  const url = API + '?brand=OCTOPUS_ENERGY&is_business=false&is_prepay=false' + (t === undefined ? '' : '&available_at=' + new Date(t).toISOString());
   return (await cachedList(url)).filter((p) => p.direction === 'IMPORT' && !p.is_prepay && !p.is_business);
 };
 const latest = (arr) => arr.sort((x, y) => Date.parse(y.available_from) - Date.parse(x.available_from))[0];
 const shortName = (dn) => dn.replace(/\bOctopus\b/g, '').replace(/\bImport\b/g, '').replace(/\s+/g, ' ').trim() || dn;
 
-// Tariffs on sale in a region (single-register, any payment option, not free), plus Tracker:
-// [{key, label, name (full display name), fuels: 'e' | 'g' | 'eg'}], sorted by label. Throws if any product could not be read, so
-// a transient failure is never cached as "that tariff does not exist".
-const fetchFamilies = async (reg) => {
+// Tariffs on sale, from the product list alone (one request), plus Tracker: [{key, code (newest version), label, name (full display
+// name)}], sorted by label. Which fuels a tariff offers in your region is only in each product's own record, so that is looked up
+// per tariff when it is first priced (productFuels).
+const fetchFamilies = async () => {
   const newest = new Map();
   for (const p of await imports()) {
     const k = keyOf(p.code), prev = newest.get(k);
     if (!prev || Date.parse(p.available_from) > Date.parse(prev.available_from)) newest.set(k, p);
   }
-  const codes = [...[...newest.values()].map((p) => p.code), ...(newest.has('SILVER') ? [] : [TRACKER[TRACKER.length - 1][0]])];
-  const fams = await Promise.all(codes.map(async (code) => {
-    const d = await getJSON(API + code + '/');
-    // Payment keys vary by product (direct_debit_monthly, or 'varying' on Flexible): any tariff for the region counts, except free
-    // ones (explicit zero unit rate and standing charge: Octopus Zero / Zero Bills, only for registered Zero homes). Time-of-use
-    // products such as Go 12M Fixed report null for these summary fields, so only an explicit 0 and 0 excludes.
-    const has = (t) => Object.values(t?.['_' + reg] || {}).some((x) => !(x.standard_unit_rate_inc_vat === 0 && x.standing_charge_inc_vat === 0));
-    const e = has(d.single_register_electricity_tariffs), g = has(d.single_register_gas_tariffs);
-    return {key: keyOf(code), label: shortName(d.display_name || code), name: d.display_name || code, fuels: (e ? 'e' : '') + (g ? 'g' : '')};
-  }));
-  const fl = fams.filter((f) => f.fuels), seen = {};
-  for (const f of fl) seen[f.label] = (seen[f.label] || 0) + 1;
-  for (const f of fl) if (seen[f.label] > 1) f.label += ' (' + f.key + ')';
-  return fl.sort((a, b) => a.label.localeCompare(b.label));
+  const fams = [...newest.values()].map((p) => ({key: keyOf(p.code), code: p.code, label: shortName(p.display_name || p.code), name: p.display_name || p.code}));
+  if (!newest.has('SILVER')) fams.push({key: 'SILVER', code: TRACKER[TRACKER.length - 1][0], label: 'Tracker', name: 'Octopus Tracker'});
+  const seen = {};
+  for (const f of fams) seen[f.label] = (seen[f.label] || 0) + 1;
+  for (const f of fams) if (seen[f.label] > 1) f.label += ' (' + f.key + ')';
+  return fams.sort((a, b) => a.label.localeCompare(b.label));
 };
 
-// The tariff list changes rarely but costs a product-list request plus one request per product, so it is kept in localStorage per
-// region. Younger than a day: used as is. Older: used straight away while a fresh copy is fetched in the background
-// (stale-while-revalidate); if that differs, listeners registered with onFamiliesChanged are called.
-const FAM_KEY = 'octopus-tariff-compare-card:families:', FAM_TTL = DAY;
-const famRead = (reg) => { try { const c = JSON.parse(localStorage.getItem(FAM_KEY + reg)); return c && Array.isArray(c.fams) ? c : null; } catch { return null; } };
-const famWrite = (reg, fams) => { try { localStorage.setItem(FAM_KEY + reg, JSON.stringify({t: Date.now(), fams})); } catch { /* storage unavailable */ } };
+// Fuels each product version offers in a region ('e', 'g', 'eg', or '' for none), from its record: any single-register tariff for the
+// region counts (payment keys vary by product: direct_debit_monthly, or 'varying' on Flexible), except free ones (explicit zero unit
+// rate and standing charge: Octopus Zero / Zero Bills, only for registered Zero homes). Time-of-use products such as Go 12M Fixed
+// report null for these summary fields, so only an explicit 0 and 0 excludes. Kept in localStorage per region and product version
+// (a new version is looked up again); versions no longer in the tariff list are dropped from it when the list is stored.
+const FUEL_KEY = 'octopus-tariff-compare-card:fuels:';
+const fuelMaps = {};
+const fuelMap = (reg) => fuelMaps[reg] || (fuelMaps[reg] = (() => {
+  try { const m = JSON.parse(localStorage.getItem(FUEL_KEY + reg)); return m && typeof m === 'object' ? m : {}; } catch { return {}; }
+})());
+const fuelSave = (reg) => { try { localStorage.setItem(FUEL_KEY + reg, JSON.stringify(fuelMap(reg))); } catch { /* storage unavailable */ } };
+// Known fuels of a product version in a region, or undefined if not looked up yet.
+export const knownFuels = (reg, code) => fuelMap(reg)[code];
+const fuelReqs = {};
+export const productFuels = (reg, code) => {
+  const k = knownFuels(reg, code);
+  if (k !== undefined) return Promise.resolve(k);
+  return fuelReqs[reg + code] || (fuelReqs[reg + code] = getJSON(API + code + '/').then((d) => {
+    const has = (t) => Object.values(t?.['_' + reg] || {}).some((x) => !(x.standard_unit_rate_inc_vat === 0 && x.standing_charge_inc_vat === 0));
+    const fuels = (has(d.single_register_electricity_tariffs) ? 'e' : '') + (has(d.single_register_gas_tariffs) ? 'g' : '');
+    fuelMap(reg)[code] = fuels;
+    fuelSave(reg);
+    return fuels;
+  }).finally(() => { delete fuelReqs[reg + code]; }));
+};
+
+// The tariff list changes rarely, so it is kept in localStorage per region. Younger than a day: used as is. Older: used straight
+// away while a fresh copy is fetched in the background (stale-while-revalidate); if that differs, listeners registered with
+// onFamiliesChanged are called.
+const FAM_KEY = 'octopus-tariff-compare-card:tariffs:', FAM_TTL = DAY;
+const famRead = (reg) => {
+  try {
+    localStorage.removeItem('octopus-tariff-compare-card:families:' + reg);  // the previous version's format
+    const c = JSON.parse(localStorage.getItem(FAM_KEY + reg));
+    return c && Array.isArray(c.fams) && c.fams.every((f) => f && f.key && f.code) ? c : null;
+  } catch { return null; }
+};
+const famWrite = (reg, fams) => {
+  try { localStorage.setItem(FAM_KEY + reg, JSON.stringify({t: Date.now(), fams})); } catch { /* storage unavailable */ }
+  const m = fuelMap(reg), codes = new Set(fams.map((f) => f.code));
+  for (const code of Object.keys(m)) if (!codes.has(code)) delete m[code];
+  fuelSave(reg);
+};
 const famListeners = new Set();
 export const onFamiliesChanged = (fn) => { famListeners.add(fn); return () => famListeners.delete(fn); };
 const famCache = {};
-const revalidate = (reg, old) => fetchFamilies(reg).then((fams) => {
+const revalidate = (reg, old) => fetchFamilies().then((fams) => {
   famWrite(reg, fams);
   if (JSON.stringify(fams) === JSON.stringify(old)) return;
   famCache[reg] = Promise.resolve(fams);
@@ -76,7 +108,7 @@ export const families = (reg) => famCache[reg] || (famCache[reg] = (async () => 
     if (!(Date.now() - c.t < FAM_TTL)) revalidate(reg, c.fams);
     return c.fams;
   }
-  const fams = await fetchFamilies(reg);
+  const fams = await fetchFamilies();
   famWrite(reg, fams);
   return fams;
 })().catch((e) => { delete famCache[reg]; throw e; }));

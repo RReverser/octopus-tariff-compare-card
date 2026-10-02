@@ -58,9 +58,9 @@ export const settled = async (page) => {
   })).toBe('ok');
 };
 
-// Legend entries as shown: text, tooltip, unavailable, hidden, width, cursor.
+// Legend entries as shown: text, tooltip, unavailable, still loading, hidden, width, cursor.
 export const legend = (page) => page.evaluate(() => [...window.card.shadowRoot.querySelectorAll('.main .apexcharts-legend-series')].map((e) => ({
-  text: e.textContent.replace(/\s+/g, ' ').trim(), title: e.title, na: e.classList.contains('na'),
+  text: e.textContent.replace(/\s+/g, ' ').trim(), title: e.title, na: e.classList.contains('na'), loading: e.classList.contains('loading'),
   hidden: e.classList.contains('apexcharts-inactive-legend'), width: Math.round(e.getBoundingClientRect().width),
   cursor: getComputedStyle(e.querySelector('.apexcharts-legend-text')).cursor})));
 

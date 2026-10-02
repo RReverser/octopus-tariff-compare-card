@@ -23,12 +23,12 @@ export const TRACKER = [
 ];
 
 const DAY = 864e5;
-// Octopus-brand household import products on sale at time t (default: now). The API filters by brand, business and prepay (a page
-// holds them all: it has no page_size for this list, and its pages are followed anyway); there is no filter for direction, and the
-// flags are checked here too.
+// Octopus-brand household (not business, not prepay) import products on sale at time t (default: now). The API filters by brand,
+// business and prepay; it has no filter for direction, so exports are dropped here. The list endpoint has no page_size; its pages
+// are followed.
 const imports = async (t) => {
   const url = API + '?brand=OCTOPUS_ENERGY&is_business=false&is_prepay=false' + (t === undefined ? '' : '&available_at=' + new Date(t).toISOString());
-  return (await cachedList(url)).filter((p) => p.direction === 'IMPORT' && !p.is_prepay && !p.is_business);
+  return (await cachedList(url)).filter((p) => p.direction === 'IMPORT');
 };
 const latest = (arr) => arr.sort((x, y) => Date.parse(y.available_from) - Date.parse(x.available_from))[0];
 const shortName = (dn) => dn.replace(/\bOctopus\b/g, '').replace(/\bImport\b/g, '').replace(/\s+/g, ' ').trim() || dn;
